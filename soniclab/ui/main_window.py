@@ -2661,7 +2661,8 @@ class MainWindow(QMainWindow):
         if result.status == STATUS_EMPTY:
             return "No beats detected"
         if result.status == STATUS_UNAVAILABLE:
-            return "Advanced Madmom analysis is unavailable until it is repaired. The rest of SonicLab still works."
+            detail = getattr(result, "message", "") or "Madmom is not installed"
+            return f"{detail} The rest of SonicLab still works."
         if result.status == STATUS_CANCELLED:
             return "Beat analysis cancelled"
         if result.status == STATUS_TIMEOUT:

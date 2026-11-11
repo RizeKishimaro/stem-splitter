@@ -18,7 +18,8 @@ chmod 755 \
     "${ROOT}/macos/lib/make_icon.py" \
     "${ROOT}/macos/lib/fetch_model.py" \
     "${ROOT}/macos/lib/verify_app.py" \
-    "${ROOT}/macos/lib/verify_madmom.py"
+    "${ROOT}/macos/lib/verify_madmom.py" \
+    "${ROOT}/macos/lib/verify_decode.py"
 
 rsync -a \
     --exclude '.git/' \
@@ -34,7 +35,7 @@ rsync -a \
     --exclude '**/*.egg-info/' \
     "${ROOT}/" "${STAGE}/SonicLab/"
 
-python3 -m py_compile "${ROOT}/macos/lib/fetch_model.py" "${ROOT}/macos/lib/verify_app.py" "${ROOT}/macos/lib/verify_madmom.py"
+python3 -m py_compile "${ROOT}/macos/lib/fetch_model.py" "${ROOT}/macos/lib/verify_app.py" "${ROOT}/macos/lib/verify_madmom.py" "${ROOT}/macos/lib/verify_decode.py"
 find "${STAGE}" -type d -name '__pycache__' -exec rm -rf {} + || true
 (
     cd "${STAGE}"

@@ -243,7 +243,7 @@ install_demucs() {
         warn "Demucs could not be installed. Stem splitting will be unavailable. SonicLab itself will still open."
         return
     fi
-    if ! pip_install "${DEMUCS_VENV}/bin/python" -c "${MACOS_DIR}/lib/demucs-constraints.txt" "dora-search" "einops" "julius>=0.2.3" "lameenc>=1.2" "openunmix" "pyyaml" "tqdm"; then
+    if ! pip_install "${DEMUCS_VENV}/bin/python" -c "${MACOS_DIR}/lib/demucs-constraints.txt" "dora-search" "einops" "julius>=0.2.3" "lameenc>=1.2" "openunmix" "pyyaml" "tqdm" "soundfile>=0.12"; then
         warn "A small piece of the stem splitter could not be installed. Stem splitting may be unavailable. SonicLab itself will still open."
         return
     fi
@@ -259,6 +259,14 @@ EOF
         warn "The stem splitter installed, but the versions were not the tested pair. It will not be used until the installer is run again."
         rm -rf "${DEMUCS_VENV}"
         return
+    fi
+    log "--- demucs audio decode ---"
+    if ! "${DEMUCS_VENV}/bin/python" "${MACOS_DIR}/lib/verify_decode.py" >>"${LOG_DIR}/install.log" 2>&1; then
+        warn "Stem splitting was installed, but it could not read a test recording. It will not be used until that is repaired. SonicLab will still open."
+        return
+    fi
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        note "FFmpeg is not installed. WAV, FLAC, AIFF, and MP3 can still be split. Other formats need to be converted to WAV first."
     fi
     touch "${DEMUCS_VENV}/.soniclab-ready"
 
@@ -491,6 +499,7 @@ EOF
 
 install_madmom() {
     step "Preparing beat analysis..."
+    log "--- madmom ---"
     note "Madmom stays in its own Python 3.11 folder. If this step fails, SonicLab still opens."
     if [[ -f "${PROJECT_ROOT}/tools/madmom_worker.py" ]]; then
         cp "${PROJECT_ROOT}/tools/madmom_worker.py" "${SUPPORT}/madmom_worker.py"

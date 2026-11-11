@@ -1,6 +1,9 @@
 # Keep the Demucs environment on the pair this installer checked.
 # Intel Macs have no newer official PyTorch wheel. torchaudio 2.7+ also
-# dropped the audio writer Demucs 4.0.1 uses.
+# dropped the audio writer Demucs 4.0.1 uses. Do not move this environment
+# to TorchAudio 2.9: that release loads audio through TorchCodec, and a
+# missing TorchCodec is the "no appropriate backend" error. SoundFile is
+# installed beside these pins so TorchAudio 2.2 can decode WAV.
 numpy<2
 torch==2.2.2
 torchaudio==2.2.2

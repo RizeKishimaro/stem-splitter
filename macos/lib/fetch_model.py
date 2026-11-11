@@ -30,11 +30,24 @@ def signatures(model: str) -> list[str]:
     raise SystemExit(f"Demucs did not list the files for {model}.")
 
 
+def cache_folders(torch_home: Path) -> list[Path]:
+    folders = [torch_home / "hub" / "checkpoints"]
+    for key in ("HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE"):
+        if os.environ.get(key):
+            folders.append(Path(os.environ[key]))
+    if os.environ.get("HF_HOME"):
+        folders.append(Path(os.environ["HF_HOME"]) / "hub")
+    folders.append(Path.home() / ".cache" / "huggingface" / "hub")
+    return folders
+
+
 def matches(folder: Path, signature: str) -> list[Path]:
     found = []
-    for path in folder.glob(signature + "-*.th"):
-        if path.is_file() and path.stat().st_size >= MIN_BYTES:
-            found.append(path)
+    patterns = (signature + "-*.th", signature + ".safetensors", "**/" + signature + ".safetensors")
+    for pattern in patterns:
+        for path in folder.glob(pattern):
+            if path.is_file() and path.stat().st_size >= MIN_BYTES:
+                found.append(path)
     return found
 
 
@@ -50,8 +63,8 @@ def main() -> int:
     if not home:
         print("The model folder is not configured.", file=sys.stderr)
         return 1
-    folder = Path(home) / "hub" / "checkpoints"
-    folder.mkdir(parents=True, exist_ok=True)
+    folders = cache_folders(Path(home))
+    folders[0].mkdir(parents=True, exist_ok=True)
     try:
         names = signatures(model)
     except SystemExit as exc:
@@ -61,13 +74,15 @@ def main() -> int:
         print(f"Could not read the Demucs model list: {exc}", file=sys.stderr)
         return 1
 
-    for name in names:
-        incomplete(folder, name)
-    if all(matches(folder, name) for name in names):
+    for folder in folders:
+        for name in names:
+            incomplete(folder, name)
+    if all(any(matches(folder, name) for folder in folders) for name in names):
         print(f"The {model} model is already downloaded. It will not be downloaded again.")
         for name in names:
-            for path in matches(folder, name):
-                print(f"Verified {path.name} ({path.stat().st_size} bytes)")
+            for folder in folders:
+                for path in matches(folder, name):
+                    print(f"Verified {path.name} ({path.stat().st_size} bytes)")
         return 0
 
     print(f"Downloading the {model} model. This can take several minutes.")
@@ -79,7 +94,7 @@ def main() -> int:
         print(f"The stem-splitting model could not be downloaded: {exc}", file=sys.stderr)
         return 1
 
-    missing = [name for name in names if not matches(folder, name)]
+    missing = [name for name in names if not any(matches(folder, name) for folder in folders)]
     if missing:
         print(
             "The download finished, but the model files are missing or too small: " + ", ".join(missing),
@@ -88,8 +103,9 @@ def main() -> int:
         return 1
     print(f"Verified the {model} model.")
     for name in names:
-        for path in matches(folder, name):
-            print(f"Verified {path.name} ({path.stat().st_size} bytes)")
+        for folder in folders:
+            for path in matches(folder, name):
+                print(f"Verified {path.name} ({path.stat().st_size} bytes)")
     return 0
 
 

@@ -40,6 +40,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from soniclab.core.audio_load import AudioLoadError, explain_separation_error, prepare_demucs_input
 from soniclab.core.beat_analysis import file_sha256
 
 
@@ -255,14 +256,35 @@ try:
     out["mps"] = bool(mps is not None and mps.is_available())
     weights = {}
     try:
-        import pathlib, yaml
+        import os, pathlib, yaml
         from demucs import pretrained
         hub = pathlib.Path(torch.hub.get_dir()) / "checkpoints"
         remote = pathlib.Path(pretrained.__file__).parent / "remote"
+        caches = []
+        for key in ("HUGGINGFACE_HUB_CACHE", "HF_HUB_CACHE"):
+            if os.environ.get(key):
+                caches.append(pathlib.Path(os.environ[key]))
+        if os.environ.get("HF_HOME"):
+            caches.append(pathlib.Path(os.environ["HF_HOME"]) / "hub")
+        caches.append(pathlib.Path.home() / ".cache" / "huggingface" / "hub")
+
+        def present(sig):
+            if any(hub.glob(sig + "-*.th")) or any(hub.glob(sig + ".safetensors")):
+                return True
+            seen = set()
+            for cache in caches:
+                folder = str(cache)
+                if folder in seen or not cache.is_dir():
+                    continue
+                seen.add(folder)
+                if any(cache.glob("**/" + sig + ".safetensors")):
+                    return True
+            return False
+
         for name in sys.argv[1:]:
             try:
                 signatures = yaml.safe_load((remote / (name + ".yaml")).read_text())["models"]
-                weights[name] = all(any(hub.glob(sig + "-*.th")) for sig in signatures)
+                weights[name] = all(present(sig) for sig in signatures)
             except Exception:
                 weights[name] = None
     except Exception:
@@ -347,7 +369,7 @@ class StemSplitter:
         device = device or DEVICE_AUTO
         source = Path(path).expanduser().resolve()
         if not source.is_file():
-            return StemResult(STATUS_ERROR, message=f"audio file not found: {source}", model=model)
+            return StemResult(STATUS_ERROR, message=f"Audio file not found: {source}", model=model)
         try:
             target = split_folder(source, folder, model)
         except OSError as exc:
@@ -359,6 +381,10 @@ class StemSplitter:
         if not self.available:
             return StemResult(STATUS_UNAVAILABLE, message="Demucs is not installed", model=model)
         target.mkdir(parents=True, exist_ok=True)
+        try:
+            prepared = prepare_demucs_input(source, target)
+        except AudioLoadError as exc:
+            return StemResult(STATUS_ERROR, message=str(exc), model=model)
         # Demucs writes into <partial>/<model>/. Stems move out only when
         # the whole run succeeded.
         partial = target / ".partial"
@@ -369,7 +395,7 @@ class StemSplitter:
         try:
             for attempt in attempts:
                 used = attempt
-                code, tail = self._run(source, partial, model, attempt, segment, on_progress, cancel_event)
+                code, tail = self._run(prepared.path, partial, model, attempt, segment, on_progress, cancel_event)
                 if cancel_event is not None and cancel_event.is_set():
                     return StemResult(STATUS_CANCELLED, message="splitting cancelled", model=model, device=used)
                 if code == 0:
@@ -381,6 +407,9 @@ class StemSplitter:
                 return StemResult(STATUS_UNAVAILABLE, message=tail, model=model, device=used)
             if code != 0:
                 detail = tail.strip().splitlines()[-1] if tail.strip() else ""
+                decoded = explain_separation_error(tail) or explain_separation_error(detail)
+                if decoded:
+                    return StemResult(STATUS_ERROR, message=decoded, model=model, device=used)
                 return StemResult(
                     STATUS_ERROR, message=f"Demucs exit {code}: {detail}".strip(), model=model, device=used
                 )
@@ -390,6 +419,7 @@ class StemSplitter:
                 if made.is_file():
                     os.replace(made, final)
         finally:
+            prepared.cleanup()
             shutil.rmtree(partial, ignore_errors=True)
         missing = [name for name, item in wanted.items() if not item.is_file()]
         if missing:

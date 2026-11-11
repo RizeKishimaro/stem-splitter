@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
 from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from soniclab.core.audio_load import AudioLoadError, read_audio
 from soniclab.core.preview import PreviewPlayer
 from soniclab.core.stems import (
     DEVICE_AUTO,
@@ -435,13 +435,16 @@ class StemSplitterPanel(QWidget):
 
     def _load(self, source: Path, folder: Path, model: str) -> None:
         try:
-            info = sf.info(str(source))
-            audio, _rate = sf.read(str(source), dtype="float32", always_2d=True)
+            audio, rate = read_audio(source)
             lows, highs = peak_envelope(audio, _ENVELOPE_BUCKETS)
             saved = existing_stems(source, folder, model)
-            self._results.put(("loaded", source, lows, highs, info.duration, info.samplerate, info.channels, saved, model))
-        except Exception as exc:
+            self._results.put((
+                "loaded", source, lows, highs, len(audio) / rate, rate, int(audio.shape[1]), saved, model
+            ))
+        except AudioLoadError as exc:
             self._results.put(("load_failed", source, str(exc)))
+        except Exception as exc:
+            self._results.put(("load_failed", source, f"Could not read {source.name}: {exc}"))
 
     def _find_saved_stems(self) -> None:
         """Stems split earlier for this song and model, without Demucs."""

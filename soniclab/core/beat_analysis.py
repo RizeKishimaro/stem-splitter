@@ -90,22 +90,30 @@ class BeatAnalysisResult:
         return tuple(event for event in self.events if event.is_downbeat)
 
 
+def _madmom_python_candidates() -> list[Path]:
+    """Places a Madmom interpreter may live. The app's own Python is not one of them."""
+    candidates = []
+    override = os.environ.get("SONICLAB_MADMOM_PYTHON")
+    if override:
+        candidates.append(Path(override))
+    installed = Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom-venv"
+    if (installed / ".soniclab-ready").is_file():
+        candidates.append(installed / "bin" / "python")
+    repo = Path(__file__).resolve().parents[2]
+    candidates.append(repo / ".venv-madmom" / "bin" / "python")
+    candidates.append(Path.cwd() / ".venv-madmom" / "bin" / "python")
+    candidates.append(Path.home() / ".venvs" / "madmom" / "bin" / "python")
+    return candidates
+
+
 def default_madmom_python() -> Path | None:
     """Interpreter that has Madmom installed, if this machine has one.
 
     The application environment is not used. Madmom stays on Python 3.11
-    because its code does not run on NumPy 2.
+    because its code does not run on NumPy 2. A path that was set but does
+    not exist is skipped so a stale setting cannot hide a working copy.
     """
-    override = os.environ.get("SONICLAB_MADMOM_PYTHON")
-    if override:
-        candidate = Path(override)
-        return candidate if candidate.is_file() else None
-    installed = Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom-venv"
-    candidates = []
-    if (installed / ".soniclab-ready").is_file():
-        candidates.append(installed / "bin" / "python")
-    candidates.append(Path(__file__).resolve().parents[2] / ".venv-madmom" / "bin" / "python")
-    for candidate in candidates:
+    for candidate in _madmom_python_candidates():
         if candidate.is_file():
             return candidate
     return None
@@ -113,12 +121,25 @@ def default_madmom_python() -> Path | None:
 
 def default_worker_script() -> Path:
     override = os.environ.get("SONICLAB_MADMOM_WORKER")
-    if override:
+    if override and Path(override).is_file():
         return Path(override)
     repo = Path(__file__).resolve().parents[2] / "tools" / "madmom_worker.py"
     if repo.is_file():
         return repo
+    cwd = Path.cwd() / "tools" / "madmom_worker.py"
+    if cwd.is_file():
+        return cwd
     return Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom_worker.py"
+
+
+def _record_madmom(message: str) -> None:
+    try:
+        folder = Path.home() / ".cache" / "soniclab"
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / "diagnostics.log").open("a", encoding="utf-8") as handle:
+            handle.write(message.rstrip() + "\n")
+    except OSError:
+        return
 
 
 def default_cache_dir() -> Path:
@@ -325,8 +346,16 @@ class BeatAnalysisClient:
             wav_path.unlink(missing_ok=True)
 
     def _execute(self, audio_path, content_hash, fps, bars, sample_rate, timeout, on_progress, cancel_event) -> BeatAnalysisResult:
-        if self.python is None or not Path(self.python).is_file() or not self.worker_script.is_file():
-            return _failure(STATUS_UNAVAILABLE, "Madmom worker is not installed", fps, bars)
+        python_ready = self.python is not None and Path(self.python).is_file()
+        worker_ready = self.worker_script.is_file()
+        if not python_ready or not worker_ready:
+            looked = ", ".join(str(path) for path in _madmom_python_candidates())
+            if not python_ready:
+                message = f"Madmom is not installed. SonicLab looked for its Python at {looked}."
+            else:
+                message = f"Madmom's worker script is missing: {self.worker_script}."
+            _record_madmom(message)
+            return _failure(STATUS_UNAVAILABLE, message, fps, bars)
         command = [
             str(self.python),
             str(self.worker_script),
