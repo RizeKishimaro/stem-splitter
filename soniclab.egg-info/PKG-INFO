@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: soniclab
+Version: 0.1.0
+Summary: A lightweight desktop multitrack audio editor
+Requires-Python: >=3.11
+Requires-Dist: PySide6>=6.7
+Requires-Dist: numpy>=1.26
+Requires-Dist: soundfile>=0.12
+Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: scipy>=1.12
+Requires-Dist: pyqtgraph>=0.13.7

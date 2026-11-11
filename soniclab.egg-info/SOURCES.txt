@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+soniclab/__init__.py
+soniclab/main.py
+soniclab.egg-info/PKG-INFO
+soniclab.egg-info/SOURCES.txt
+soniclab.egg-info/dependency_links.txt
+soniclab.egg-info/entry_points.txt
+soniclab.egg-info/requires.txt
+soniclab.egg-info/top_level.txt
+soniclab/core/__init__.py
+soniclab/core/audio_engine.py
+soniclab/core/project.py
+soniclab/ui/__init__.py
+soniclab/ui/main_window.py
+soniclab/ui/timeline.py

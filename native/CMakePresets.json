@@ -1,0 +1,179 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "SONICLAB_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux, no JUCE, Debug (Ninja)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux, no JUCE, Release (Ninja)",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux, no JUCE, ThreadSanitizer",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "SONICLAB_SANITIZE_THREAD": "ON"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux, no JUCE, Address + UB sanitizers",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "SONICLAB_SANITIZE_ADDRESS": "ON"
+      }
+    },
+    {
+      "name": "linux-juce",
+      "displayName": "Linux with JUCE: Standalone plugin, plugin tests, host adapter (run scripts/get_juce.sh first)",
+      "inherits": "linux-debug",
+      "cacheVariables": {
+        "SONICLAB_WITH_JUCE": "ON",
+        "SONICLAB_JUCE_DIR": "${sourceDir}/third_party/JUCE"
+      }
+    },
+    {
+      "name": "macos-xcode",
+      "displayName": "macOS with JUCE: AUv2 + Standalone, universal (Xcode; run scripts/get_juce.sh first)",
+      "inherits": "base",
+      "generator": "Xcode",
+      "cacheVariables": {
+        "SONICLAB_WITH_JUCE": "ON",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
+        "SONICLAB_JUCE_DIR": "${sourceDir}/third_party/JUCE"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos-ninja",
+      "displayName": "macOS, no JUCE, Debug (Ninja) for the shared-code tests",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug"
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release"
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan"
+    },
+    {
+      "name": "linux-juce",
+      "configurePreset": "linux-juce"
+    },
+    {
+      "name": "macos-xcode",
+      "configurePreset": "macos-xcode",
+      "configuration": "Release"
+    },
+    {
+      "name": "macos-ninja",
+      "configurePreset": "macos-ninja"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-ninja",
+      "configurePreset": "macos-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-xcode",
+      "configurePreset": "macos-xcode",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-juce",
+      "configurePreset": "linux-juce",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

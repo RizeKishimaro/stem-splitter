@@ -1,0 +1,23 @@
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soniclab"
+version = "0.1.0"
+description = "A lightweight desktop multitrack audio editor"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+    "sounddevice>=0.4.6",
+    "scipy>=1.12",
+    "pyqtgraph>=0.13.7",
+    "aubio>=0.4.9",
+]
+
+[project.scripts]
+soniclab = "soniclab.main:main"
+
