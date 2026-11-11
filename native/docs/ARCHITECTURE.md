@@ -111,13 +111,26 @@ native/
     chain_state.h/.cpp       capture/encode/decode/restore chain state
     juce_plugin_host.h/.cpp  JUCE adapter (only with SONICLAB_WITH_JUCE)
     juce/CMakeLists.txt      soniclab::host_juce: AU on macOS, VST3 opt-in
+  plugins/shared/          what every SonicLab analysis plugin shares
+    analysis_pipeline.h/.cpp soniclab::analysis_core (no JUCE):
+                             audio thread → chunk FIFO → worker → marker FIFO,
+                             OnlineAnalyzer interface (reset/analyze/finish/summary)
+    juce/Theme.h             colours, fonts and LookAndFeel from the Python app
+    juce/Widgets.*           level meter, LCD frame, confidence bar
+    juce/AnalysisViews.*     dropped-file waveform view, live marker lane
+    juce/FileAnalysis.*      background analysis of a dropped audio file
+    juce/AnalysisProcessorBase.*  pass-through, metering, parameters, versioned
+                             state, pipeline, file analysis
+    juce/AnalysisEditorBase.*     header, footer, Enabled, meter hints, drag and drop
+  cmake/SonicLabPlugin.cmake  soniclab_add_analysis_plugin(): one call per plugin
   plugins/beat_analyzer/
-    analysis_pipeline.h/.cpp soniclab::beat_analyzer_core (no JUCE):
-                             audio thread → chunk FIFO → worker → marker FIFO
-    src/PluginProcessor.*    JUCE AudioProcessor, pass-through
-    src/PluginEditor.*       placeholder marker strip
-    juce/CMakeLists.txt      juce_add_plugin (AU on macOS, Standalone, VST3 opt-in)
-  tests/                   dependency-free runner, 24 tests, one CTest per group
+    beat_tracker.h/.cpp      soniclab::beat_analyzer_core (no JUCE): onset
+                             features, tempo, DP beat tracking, downbeats, meter
+    src/PluginProcessor.*    parameters (tempo range, beats per bar) + tracker
+    src/PluginEditor.*       tempo LCD, settings row
+    juce/CMakeLists.txt      soniclab_add_analysis_plugin + headless tests
+  tools/beat_cli.cpp       tracker on raw audio, for scripts/compare_beats.py
+  tests/                   dependency-free runner, 33 tests, one CTest per group
   docs/ARCHITECTURE.md     this file
 ```
 

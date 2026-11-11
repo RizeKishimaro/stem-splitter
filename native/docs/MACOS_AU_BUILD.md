@@ -12,24 +12,38 @@ macOS build. Please send back the outputs listed under
 | Format | Audio Unit v2 effect (`aufx`) |
 | Manufacturer / subtype | `Snlb` / `Btan` |
 | Manufacturer name in Logic | SonicLab |
-| Version | 0.1.1 |
+| Version | 0.2.0 |
 | Bundle ID | `org.soniclab.beatanalyzer` |
 | Artifact | `SonicLab Beat Analyzer.component` |
 | Install location | `~/Library/Audio/Plug-Ins/Components/` |
 | Validate with | `auval -v aufx Btan Snlb` |
 
-## What the plugin does (Phase 4)
+## What the plugin does (0.2.0)
 
 * Audio passes through **unchanged**, on mono or stereo tracks.
 * The editor shows the input level (peak meter, -60 to +6 dBFS, with
   peak hold) and an **Enabled** switch.
 * **Enabled** is an automatable parameter that is saved with the project.
   Turning it off stops metering and analysis. Audio still passes through.
+* **Beat tracking.** While audio plays, the display shows the tempo in
+  BPM and the beats per bar, each with a five-step confidence bar. The
+  "Live beats" lane shows the last 8 seconds of beats, numbered within
+  the bar, with downbeats in amber. Beats appear about a quarter of a
+  second after they sound, and the tempo needs about 4 seconds to lock.
+* **Settings**, all automatable and saved with the project: *Tempo* (the
+  slowest and fastest tempo to look for, 60 and 200 BPM by default) and
+  *Beats / bar* (Auto chooses 3 or 4; 2 to 7 fix the bar length).
+  **Reset** forgets the live analysis.
 * Dropping an audio file (WAV, AIFF, FLAC, Ogg, and on macOS also MP3,
   M4A and other Core Audio formats) onto the plugin window analyses it in
-  the background and shows its waveform, length and peak. The track's
-  audio is not affected, and the file is not saved with the project.
-* There is no beat detection yet. The marker strips stay empty.
+  the background and shows its waveform with beats and downbeats, its
+  tempo, beats per bar, length and peak. **Analyse again** re-runs it with
+  the current settings. The track's audio is not affected, and the file
+  is not saved with the project.
+* The tracker is SonicLab's own (not Madmom, which the DAW uses). On ten
+  test songs it matched Madmom's tempo on eight; downbeats are less
+  reliable than beats. If the tempo reads half or double, narrow the
+  Tempo range.
 
 ## 1. Prerequisites (once)
 
@@ -101,7 +115,7 @@ choose the `SonicLabBeatAnalyzer_AU` scheme and build there.
 Optional extra checks:
 
 * `ctest --preset macos-xcode` runs the native unit tests, including the
-  16 plugin tests, natively on the Mac. Build `ALL_BUILD` first.
+  20 plugin tests, natively on the Mac. Build `ALL_BUILD` first.
 * `cmake --build --preset macos-xcode --target SonicLabBeatAnalyzer_Standalone`
   builds a standalone app. It is useful for a quick look at the editor
   without Logic.
@@ -141,19 +155,26 @@ On Apple Silicon you can also validate the Intel slice:
    * The sound is unchanged. For a strict check, duplicate the track, put
      the plugin on one copy, invert polarity on the other (Gain plugin →
      Invert), and the sum should be silent.
-   * The meter moves with the input. The text line shows the level in dBFS
-     and "analysed N s" counting up. "dropped frames" stays at 0.
-   * Untick **Enabled**: the sound is unchanged, and the meter and
+   * The meter moves with the input and the "listened" time counts up.
+     It must never say "dropped".
+   * After a few seconds the BPM appears and matches the project tempo
+     (try a drum loop or a full song at a known tempo), and the Live beats
+     lane shows lines on the beat with amber downbeats.
+   * Untick **Enabled**: the sound is unchanged, and the meter, tempo and
      counter stop.
 5. Repeat on a **mono** audio track and choose the **Mono** version of
    the plugin.
-6. **State:** turn Enabled off, save the project, close it, reopen it.
-   The plugin should open with Enabled still off.
-7. **Automation (optional):** show automation for the track and pick
-   *SonicLab Beat Analyzer → Enabled*. It should be listed and drawable.
+6. **State:** turn Enabled off, set Tempo to 90–150 and Beats / bar to 3,
+   save the project, close it, reopen it. The plugin should open with the
+   same four settings. A project saved with version 0.1.x should open
+   with Enabled as saved and the new settings at their defaults.
+7. **Automation (optional):** show automation for the track. *Enabled*,
+   *Slowest tempo*, *Fastest tempo* and *Beats per bar* should be listed
+   under SonicLab Beat Analyzer and be drawable.
 8. **Dropped file (optional):** drag a WAV or MP3 from **Finder** onto the
    plugin window. It should show "Analysing...", then the waveform with
-   length, sample rate and peak. Playback must not glitch meanwhile. Also
+   beat lines, and under it the length, sample rate, peak, BPM and beats
+   per bar. Playback must not glitch meanwhile. Also
    try a drag from Logic's own browser or a region, and say whether the
    plugin or Logic took it.
 

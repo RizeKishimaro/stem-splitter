@@ -1,4 +1,4 @@
-// SonicLab's visual theme for the plugin editor, matching the Python app
+// SonicLab's visual theme for every plugin editor, matching the Python app
 // (soniclab/ui/theme.py and the timeline's clip colours): near-black
 // surfaces, square corners, small upper-case section labels, and amber as
 // the only highlight. Colour names follow theme.py.
@@ -6,7 +6,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-namespace soniclab::beat_analyzer::theme {
+namespace soniclab::plugin::theme {
 
 // soniclab/ui/theme.py
 inline const juce::Colour kWindow{0xff0c0d10};
@@ -27,6 +27,10 @@ inline const juce::Colour kLcdBackground{0xff0c0f13};
 inline const juce::Colour kWell{0xff0e1114};  // inputs, meter background
 inline const juce::Colour kHover{0xff222831};
 inline const juce::Colour kHandle{0xff3a424e};
+inline const juce::Colour kSelect{0xff243044};
+inline const juce::Colour kMenu{0xff161b21};
+inline const juce::Colour kGroove{0xff2c333c};
+inline const juce::Colour kSliderHandle{0xffc8ced6};
 // soniclab/ui/meter.py
 inline const juce::Colour kMeter{0xff8e9aad};
 inline const juce::Colour kMeterHot{0xffc4a46a};
@@ -87,9 +91,30 @@ public:
         setColour(juce::TextButton::textColourOffId, kTextSoft);
         setColour(juce::TextButton::textColourOnId, juce::Colour(0xfff2f4f7));
         setColour(juce::ToggleButton::textColourId, kText);
-        setColour(juce::TooltipWindow::backgroundColourId, juce::Colour(0xff161b21));
+        setColour(juce::Label::textColourId, kText);
+        setColour(juce::TooltipWindow::backgroundColourId, kMenu);
         setColour(juce::TooltipWindow::textColourId, kText);
         setColour(juce::TooltipWindow::outlineColourId, kLine);
+        // QLineEdit / QComboBox / QDoubleSpinBox
+        setColour(juce::ComboBox::backgroundColourId, kWell);
+        setColour(juce::ComboBox::outlineColourId, kLine);
+        setColour(juce::ComboBox::textColourId, kText);
+        setColour(juce::ComboBox::arrowColourId, kTextDim);
+        setColour(juce::ComboBox::focusedOutlineColourId, kAmberDim);
+        setColour(juce::PopupMenu::backgroundColourId, kMenu);
+        setColour(juce::PopupMenu::textColourId, kText);
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, kSelect);
+        setColour(juce::PopupMenu::highlightedTextColourId, juce::Colour(0xfff4f6f8));
+        setColour(juce::Slider::textBoxBackgroundColourId, kWell);
+        setColour(juce::Slider::textBoxOutlineColourId, kLine);
+        setColour(juce::Slider::textBoxTextColourId, kText);
+        setColour(juce::Slider::textBoxHighlightColourId, juce::Colour(0xff3a3424));
+        setColour(juce::TextEditor::backgroundColourId, kWell);
+        setColour(juce::TextEditor::textColourId, kText);
+        setColour(juce::TextEditor::outlineColourId, kLine);
+        setColour(juce::TextEditor::focusedOutlineColourId, kAmberDim);
+        setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff3a3424));
+        setColour(juce::CaretComponent::caretColourId, kAmber);
     }
 
     // QCheckBox: a 12px square, amber when checked.
@@ -114,11 +139,68 @@ public:
         else if (highlighted) g.setColour(kHover);
         else g.setColour(juce::Colours::transparentBlack);
         g.fillRect(bounds);
-        g.setColour(kLine);
+        g.setColour(button.getToggleState() ? kAmberDim : kLine);
         g.drawRect(bounds, 1.0f);
     }
 
     juce::Font getTextButtonFont(juce::TextButton&, int) override { return sans(11.0f); }
+
+    // QComboBox: square well with a small chevron.
+    void drawComboBox(juce::Graphics& g, int width, int height, bool, int, int, int, int,
+                      juce::ComboBox& box) override {
+        const auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+        g.setColour(box.findColour(juce::ComboBox::backgroundColourId));
+        g.fillRect(bounds);
+        g.setColour(box.hasKeyboardFocus(true) ? kAmberDim : kLine);
+        g.drawRect(bounds.reduced(0.5f), 1.0f);
+        const auto cx = static_cast<float>(width) - 9.0f;
+        const auto cy = static_cast<float>(height) / 2.0f;
+        juce::Path chevron;
+        chevron.startNewSubPath(cx - 3.5f, cy - 1.5f);
+        chevron.lineTo(cx, cy + 2.0f);
+        chevron.lineTo(cx + 3.5f, cy - 1.5f);
+        g.setColour(kTextDim);
+        g.strokePath(chevron, juce::PathStrokeType(1.2f));
+    }
+
+    juce::Font getComboBoxFont(juce::ComboBox&) override { return mono(11.0f); }
+    juce::Font getPopupMenuFont() override { return sans(12.0f); }
+
+    void positionComboBoxText(juce::ComboBox& box, juce::Label& label) override {
+        label.setBounds(1, 1, box.getWidth() - 18, box.getHeight() - 2);
+        label.setFont(getComboBoxFont(box));
+    }
+
+    void drawPopupMenuBackground(juce::Graphics& g, int width, int height) override {
+        g.fillAll(kMenu);
+        g.setColour(kLine);
+        g.drawRect(0, 0, width, height, 1);
+    }
+
+    // QSlider: a 2px groove and a narrow light handle.
+    void drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height, float sliderPos, float, float,
+                          juce::Slider::SliderStyle style, juce::Slider& slider) override {
+        if (style != juce::Slider::LinearHorizontal) {
+            LookAndFeel_V4::drawLinearSlider(g, x, y, width, height, sliderPos, 0.0f, 0.0f, style, slider);
+            return;
+        }
+        const auto cy = static_cast<float>(y) + static_cast<float>(height) / 2.0f;
+        g.setColour(kGroove);
+        g.fillRect(juce::Rectangle<float>(static_cast<float>(x), cy - 1.0f, static_cast<float>(width), 2.0f));
+        g.setColour(kAmberDim);
+        g.fillRect(juce::Rectangle<float>(static_cast<float>(x), cy - 1.0f, sliderPos - static_cast<float>(x), 2.0f));
+        g.setColour(slider.isEnabled() ? kSliderHandle : kTextDisabled);
+        g.fillRect(juce::Rectangle<float>(sliderPos - 4.0f, cy - 6.0f, 8.0f, 12.0f));
+    }
+
+    int getSliderThumbRadius(juce::Slider&) override { return 4; }
+
+    juce::Label* createSliderTextBox(juce::Slider& slider) override {
+        auto* label = LookAndFeel_V4::createSliderTextBox(slider);
+        label->setFont(mono(11.0f));
+        label->setJustificationType(juce::Justification::centred);
+        return label;
+    }
 };
 
-}  // namespace soniclab::beat_analyzer::theme
+}  // namespace soniclab::plugin::theme

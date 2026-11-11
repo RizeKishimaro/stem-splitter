@@ -1,0 +1,10 @@
+# Madmom 0.16.1 still calls np.float and np.int. Those names disappeared
+# in NumPy 1.24, and the SonicLab app uses NumPy 2, so this environment
+# stays on the last NumPy that provides them. Python 3.11 is required
+# because NumPy 1.23.5 has no Python 3.12 wheels.
+setuptools>=68,<81
+cython==0.29.37
+numpy==1.23.5
+scipy==1.10.1
+mido==1.3.3
+madmom==0.16.1

@@ -1,0 +1,7 @@
+# Keep the Demucs environment on the pair this installer checked.
+# Intel Macs have no newer official PyTorch wheel. torchaudio 2.7+ also
+# dropped the audio writer Demucs 4.0.1 uses.
+numpy<2
+torch==2.2.2
+torchaudio==2.2.2
+demucs==4.0.1

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace soniclab::beat_analyzer {
+namespace soniclab::plugin {
 namespace {
 constexpr int kReadFrames = 8192;
 
@@ -46,6 +46,12 @@ juce::String FileAnalysis::supportedFormatsText() {
     for (const auto& extension : supportedExtensions())
         if (extension != "aif" && extension != "bwf") shown.add(extension.toUpperCase());
     return shown.joinIntoString(", ");
+}
+
+juce::String FileAnalysis::chooserPattern() {
+    juce::StringArray patterns;
+    for (const auto& extension : supportedExtensions()) patterns.add("*." + extension);
+    return patterns.joinIntoString(";");
 }
 
 void FileAnalysis::start(const juce::File& file) {
@@ -152,8 +158,10 @@ void FileAnalysis::run(juce::File file) {
                         std::memory_order_relaxed);
     }
 
+    analyzer->finish(sink);
+    result.summary = analyzer->summary();
     result.status = FileAnalysisResult::Status::Done;
     publish(std::move(result));
 }
 
-}  // namespace soniclab::beat_analyzer
+}  // namespace soniclab::plugin

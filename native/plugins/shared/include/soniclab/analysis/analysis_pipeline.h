@@ -1,6 +1,7 @@
 // Moves audio from the realtime callback to a worker thread for analysis,
 // and markers from the worker back to the UI. JUCE-free so it is unit tested
-// on every platform; the plugin in src/PluginProcessor.cpp only forwards.
+// on every platform; every SonicLab analysis plugin uses it (see
+// plugins/shared/juce/AnalysisProcessorBase).
 //
 //   audio thread   pushAudio()   downmix to mono, stamp, push chunks (never blocks)
 //   worker thread  analyzer      pops chunks, emits AnalysisMarkers
@@ -19,7 +20,7 @@
 #include "soniclab/common/analysis_marker.h"
 #include "soniclab/common/spsc_ring.h"
 
-namespace soniclab::beat_analyzer {
+namespace soniclab::analysis {
 
 inline constexpr int kChunkFrames = 256;
 
@@ -35,17 +36,29 @@ public:
     virtual void emit(const AnalysisMarker& marker) = 0;
 };
 
-// Runs on the worker thread only. May allocate and take its time.
+// Results an analyzer reports besides markers. Zero means "not known yet".
+struct AnalysisSummary {
+    float tempoBpm = 0.0f;
+    float tempoConfidence = 0.0f;  // 0..1
+    int beatsPerBar = 0;
+    float meterConfidence = 0.0f;     // 0..1
+    float downbeatConfidence = 0.0f;  // 0..1
+};
+
+// reset/analyze/finish run on one worker thread only and may allocate and
+// take their time. summary() may be called from any thread.
 class OnlineAnalyzer {
 public:
     virtual ~OnlineAnalyzer() = default;
     virtual void reset(double sampleRate) = 0;
     virtual void analyze(const AudioChunk& chunk, MarkerSink& sink) = 0;
+    // The stream has ended (a file was read to the end): emit what is left.
+    virtual void finish(MarkerSink&) {}
+    virtual AnalysisSummary summary() const { return {}; }
 };
 
-// Phase 1 stand-in: consumes audio and reports nothing. The real detector
-// (onset envelope + tempo tracking, or a port of the Madmom pipeline) slots
-// in behind the same interface.
+// Consumes audio and reports nothing. For tests, and for plugins that have
+// no analyzer of their own yet.
 class PlaceholderAnalyzer final : public OnlineAnalyzer {
 public:
     void reset(double) override { framesSeen_ = 0; }
@@ -76,12 +89,16 @@ public:
 
     // UI thread (single consumer).
     std::size_t popMarkers(AnalysisMarker* out, std::size_t maximum) noexcept;
+    // Any thread. The worker resets the analyzer before its next chunk;
+    // stream positions keep counting.
+    void requestAnalyzerReset() noexcept { resetRequested_.store(true, std::memory_order_release); }
 
     std::uint64_t droppedFrames() const noexcept { return dropped_.load(std::memory_order_relaxed); }
     std::uint64_t droppedMarkers() const noexcept { return droppedMarkers_.load(std::memory_order_relaxed); }
     std::int64_t framesAnalyzed() const noexcept { return analyzed_.load(std::memory_order_relaxed); }
 
     OnlineAnalyzer& analyzer() { return *analyzer_; }
+    const OnlineAnalyzer& analyzer() const { return *analyzer_; }
 
 private:
     class RingSink;
@@ -92,6 +109,7 @@ private:
     SpscRing<AnalysisMarker> markers_;
     std::thread worker_;
     std::atomic<bool> quit_{false};
+    std::atomic<bool> resetRequested_{false};
     std::int64_t position_ = 0;  // audio thread only
     double sampleRate_ = 0.0;
     std::atomic<std::uint64_t> dropped_{0};
@@ -99,4 +117,4 @@ private:
     std::atomic<std::int64_t> analyzed_{0};
 };
 
-}  // namespace soniclab::beat_analyzer
+}  // namespace soniclab::analysis

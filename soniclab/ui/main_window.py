@@ -101,6 +101,7 @@ from soniclab.ui.icons import (
 )
 from soniclab.ui.inspector import Inspector
 from soniclab.ui.mixer import Mixer
+from soniclab.ui.stem_splitter import StemSplitterPanel
 from soniclab.ui.theme import DARK_STYLE, build_palette
 from soniclab.ui.visualizer import Visualizer
 from soniclab.ui.timeline import (
@@ -347,6 +348,13 @@ class MainWindow(QMainWindow):
         self.visualizer = Visualizer()
         self.visualizer_dock = self._dock("Visualizer", self.visualizer, features)
         self.visualizer_dock.setObjectName("visualizerDock")
+        self.stem_splitter = StemSplitterPanel()
+        self.stem_splitter.default_folder = lambda: default_stem_folder(self.current_path)
+        self.stem_splitter.busy_elsewhere = lambda: self.stem_jobs.pending() > 0
+        self.stem_splitter.add_requested.connect(self._add_split_stems)
+        self.stem_splitter.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
+        self.stem_splitter_dock = self._dock("Stem Splitter", self.stem_splitter, features)
+        self.stem_splitter_dock.setObjectName("stemSplitterDock")
         self.browser_dock.setMinimumWidth(200)
         self.inspector_dock.setMinimumWidth(240)
         self.mixer_dock.setMinimumHeight(200)
@@ -354,7 +362,9 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.inspector_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.mixer_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.visualizer_dock)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.stem_splitter_dock)
         self.tabifyDockWidget(self.mixer_dock, self.visualizer_dock)
+        self.tabifyDockWidget(self.visualizer_dock, self.stem_splitter_dock)
         self.mixer_dock.raise_()
         self.visualizer_dock.visibilityChanged.connect(self._sync_capture)
         self.resizeDocks([self.browser_dock, self.inspector_dock], [240, 260], Qt.Orientation.Horizontal)
@@ -393,6 +403,7 @@ class MainWindow(QMainWindow):
             lambda checked: QSettings("SonicLab", "SonicLab").setValue("import/splitStems", bool(checked))
         )
         file_menu.addAction(self.split_on_import_action)
+        self._action(file_menu, "Stem Splitter…", self._show_stem_splitter)
         file_menu.addSeparator()
         self.export_bars_action = self._action(
             file_menu, "Export Bars…", lambda: self._export_bars(), QKeySequence("Ctrl+Shift+E")
@@ -410,7 +421,13 @@ class MainWindow(QMainWindow):
         self.delete_action = self._action(edit_menu, "Delete Track", self._delete_track)
 
         view_menu = self.menuBar().addMenu("&View")
-        for dock in (self.browser_dock, self.inspector_dock, self.mixer_dock, self.visualizer_dock):
+        for dock in (
+            self.browser_dock,
+            self.inspector_dock,
+            self.mixer_dock,
+            self.visualizer_dock,
+            self.stem_splitter_dock,
+        ):
             view_menu.addAction(dock.toggleViewAction())
         view_menu.addSeparator()
         self.beats_action = QAction("Beat Markers", self)
@@ -768,10 +785,10 @@ class MainWindow(QMainWindow):
         if not splitting:
             self.statusBar().showMessage(message, 8000)
 
-    def _add_stem_tracks(self, name: str, stems: dict) -> list[dict]:
-        """Append one track per stem, drums first. Marks drums if none lead."""
+    def _add_stem_tracks(self, name: str, stems: dict, order=STEMS) -> list[dict]:
+        """Append one track per stem in ``order``. Marks drums if none lead."""
         added = []
-        for stem in STEMS:
+        for stem in order:
             path = os.path.abspath(stems[stem])
             audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
             audio = AudioEngine.resample(audio, sample_rate)
@@ -785,9 +802,35 @@ class MainWindow(QMainWindow):
                 }
             )
         self.project.tracks.extend(added)
-        if self._drum_index() is None:
+        if self._drum_index() is None and added and order[0] == "drums":
             added[0]["drum_reference"] = True
         return added
+
+    def _show_stem_splitter(self) -> None:
+        self.stem_splitter_dock.show()
+        self.stem_splitter_dock.raise_()
+
+    def _add_split_stems(self, name: str, stems: dict, order: tuple) -> None:
+        """Add stems from the Stem Splitter panel as tracks, all starting at 0."""
+        self._remember_edit()
+        try:
+            added = self._add_stem_tracks(name, stems, order)
+        except Exception as exc:
+            self._gesture_before = None
+            QMessageBox.warning(self, "Could not load stems", str(exc))
+            return
+        if self._drum_index() is None:
+            self._detect_drum_track()
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        self._select_track(len(self.project.tracks) - len(added))
+        self._queue_beat_sources(track["path"] for track in added)
+        drum = self._drum_index()
+        lead = self.project.tracks[drum].get("name") if drum is not None else "none"
+        self.statusBar().showMessage(
+            f"Added {len(added)} stem{'s' if len(added) != 1 else ''} of “{name}”. Drum track: {lead}", 10000
+        )
 
     def _show_stem_progress(self, fraction: float | None) -> None:
         """Show the splitting banner, or hide it when ``fraction`` is None."""
@@ -876,6 +919,11 @@ class MainWindow(QMainWindow):
         if not paths:
             return False
         event.acceptProposedAction()
+        if watched is self.stem_splitter or self.stem_splitter.isAncestorOf(watched):
+            # A song dropped on the Stem Splitter is split, not imported.
+            if event_type == QEvent.Type.Drop:
+                QTimer.singleShot(0, lambda: self.stem_splitter.set_source(paths[0]))
+            return True
         if event_type == QEvent.Type.Drop:
             # Let the file manager finish its drag before dialogs can appear.
             QTimer.singleShot(0, lambda: self._import_paths(paths))
@@ -1021,6 +1069,8 @@ class MainWindow(QMainWindow):
         self._poll_beats()
         self._poll_onsets()
         self._poll_stems()
+        if self.engine.playing:
+            self.stem_splitter.stop_preview()  # one sound source at a time
 
     def _play(self):
         try:
@@ -2611,7 +2661,7 @@ class MainWindow(QMainWindow):
         if result.status == STATUS_EMPTY:
             return "No beats detected"
         if result.status == STATUS_UNAVAILABLE:
-            return "Madmom is not installed"
+            return "Advanced Madmom analysis is unavailable until it is repaired. The rest of SonicLab still works."
         if result.status == STATUS_CANCELLED:
             return "Beat analysis cancelled"
         if result.status == STATUS_TIMEOUT:
@@ -2746,6 +2796,7 @@ class MainWindow(QMainWindow):
         self.beat_jobs.cancel()
         self.onset_jobs.cancel()
         self.stem_jobs.cancel()
+        self.stem_splitter.shutdown()
         self.visualizer.set_active(False)
         self.recorder.stop_stream()
         if os.environ.get("QT_QPA_PLATFORM") != "offscreen":

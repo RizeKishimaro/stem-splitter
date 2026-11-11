@@ -1,9 +1,9 @@
-#include "beat_analyzer/analysis_pipeline.h"
+#include "soniclab/analysis/analysis_pipeline.h"
 
 #include <algorithm>
 #include <chrono>
 
-namespace soniclab::beat_analyzer {
+namespace soniclab::analysis {
 
 class AnalysisPipeline::RingSink final : public MarkerSink {
 public:
@@ -31,6 +31,7 @@ void AnalysisPipeline::start(double sampleRate) {
     droppedMarkers_.store(0);
     analyzed_.store(0);
     analyzer_->reset(sampleRate);
+    resetRequested_.store(false);
     quit_.store(false);
     worker_ = std::thread([this] { run(); });
 }
@@ -74,6 +75,7 @@ void AnalysisPipeline::run() {
     AudioChunk chunk;
     while (true) {
         bool any = false;
+        if (resetRequested_.exchange(false, std::memory_order_acq_rel)) analyzer_->reset(sampleRate_);
         while (chunks_.pop(chunk)) {
             any = true;
             analyzer_->analyze(chunk, sink);
@@ -90,4 +92,4 @@ void AnalysisPipeline::run() {
     }
 }
 
-}  // namespace soniclab::beat_analyzer
+}  // namespace soniclab::analysis

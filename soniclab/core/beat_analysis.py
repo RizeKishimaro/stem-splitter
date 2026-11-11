@@ -91,17 +91,34 @@ class BeatAnalysisResult:
 
 
 def default_madmom_python() -> Path | None:
-    """Interpreter that has Madmom installed, if this machine has one."""
+    """Interpreter that has Madmom installed, if this machine has one.
+
+    The application environment is not used. Madmom stays on Python 3.11
+    because its code does not run on NumPy 2.
+    """
     override = os.environ.get("SONICLAB_MADMOM_PYTHON")
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
-    candidate = Path(__file__).resolve().parents[2] / ".venv-madmom" / "bin" / "python"
-    return candidate if candidate.is_file() else None
+    installed = Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom-venv"
+    candidates = []
+    if (installed / ".soniclab-ready").is_file():
+        candidates.append(installed / "bin" / "python")
+    candidates.append(Path(__file__).resolve().parents[2] / ".venv-madmom" / "bin" / "python")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def default_worker_script() -> Path:
-    return Path(__file__).resolve().parents[2] / "tools" / "madmom_worker.py"
+    override = os.environ.get("SONICLAB_MADMOM_WORKER")
+    if override:
+        return Path(override)
+    repo = Path(__file__).resolve().parents[2] / "tools" / "madmom_worker.py"
+    if repo.is_file():
+        return repo
+    return Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom_worker.py"
 
 
 def default_cache_dir() -> Path:

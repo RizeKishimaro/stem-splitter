@@ -16,6 +16,7 @@ is done.**
 | aubio (Python dep, already used) | GPLv3 or later | SonicLab itself is distributed |
 | Madmom (worker venv, already used) | Code BSD; **pretrained models CC BY-NC-SA** | Any commercial use of Madmom-based results or a port of its models |
 | PySide6 | LGPLv3 / GPLv2 / GPLv3 | SonicLab is distributed (LGPL: keep Qt dynamically linked and replaceable) |
+| ONNX Runtime 1.20.1 | MIT, plus the notices in `ThirdPartyNotices.txt` | A binary that links `libonnxruntime.so` is distributed |
 
 Nothing in `native/` bundles JUCE or any SDK. JUCE is obtained only when
 you run `scripts/get_juce.sh`, set `SONICLAB_JUCE_DIR`, or opt in to
@@ -58,6 +59,12 @@ Practical guidance:
   an AUv3 is ever shipped through the Mac App Store.
 * The AU build itself pulls in no third-party SDK. The AU wrapper uses only
   Apple's system frameworks.
+* The beat tracker (`plugins/beat_analyzer/src/beat_tracker.cpp`) is
+  SonicLab's own code with no third-party source: spectral-flux onsets,
+  autocorrelation tempo and dynamic-programming beat tracking as published
+  by D. Ellis, "Beat Tracking by Dynamic Programming" (2007). It does not
+  use Madmom (models CC BY-NC-SA) or aubio (GPLv3), so the plugins carry
+  neither licence.
 * Dropped-file analysis decodes audio with JUCE's `juce_audio_formats`.
   That compiles in JUCE's bundled **FLAC** and **Ogg Vorbis** codecs, both
   BSD-licensed (see `modules/juce_audio_formats/codecs/` and JUCE's
@@ -143,3 +150,26 @@ work, so they belong in the same conversation:
   commercial use. Porting those models into the native Beat Analyzer would
   carry the same restriction. A commercial detector needs its own models
   or an algorithm without them.
+
+## ONNX Runtime
+
+The inference library (`native/inference`) links the official ONNX Runtime
+CPU build, version **1.20.1**. CMake downloads the shared library at
+configure time, or uses a tree passed in `SONICLAB_ONNXRUNTIME_ROOT`. The
+library is not committed.
+
+* **Licence:** MIT, copyright Microsoft Corporation. The archive also
+  ships `ThirdPartyNotices.txt` for code ONNX Runtime itself vendors
+  (for example its protobuf and flatbuffers pieces). A distributed
+  binary that links `libonnxruntime.so` needs to ship `LICENSE` and
+  `ThirdPartyNotices.txt` from that same archive.
+* **What this pin was checked against:** the Linux x86_64 archive
+  `onnxruntime-linux-x64-1.20.1.tgz`, SHA256
+  `67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105`.
+  That package's headers have no Core ML symbols. CPU execution is the
+  provider the tests actually ran. Core ML, Metal, and the macOS
+  archives have not been executed on a Mac.
+* **Models are not a dependency of this library.** Callers pass a model
+  file. Do not commit trained weights. The files under
+  `native/inference/testdata/` are tiny graphs this repository generates
+  (`inference/tools/make_test_model.py`); they are not third-party weights.

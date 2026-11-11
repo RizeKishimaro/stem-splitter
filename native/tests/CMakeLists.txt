@@ -2,18 +2,23 @@ add_executable(soniclab_native_tests
     test_main.cpp
     test_common.cpp
     test_host.cpp
+    test_analysis.cpp
     test_beat_analyzer.cpp)
 target_link_libraries(soniclab_native_tests PRIVATE
     soniclab::common
     soniclab::host_core
+    soniclab::analysis_core
     soniclab::beat_analyzer_core
     soniclab_warnings)
 
 # One CTest entry per group; the runner filters by name prefix.
-foreach(group common host beat_analyzer)
+foreach(group common host analysis beat_analyzer)
     add_test(NAME ${group} COMMAND soniclab_native_tests ${group}.)
     set_tests_properties(${group} PROPERTIES TIMEOUT 60)
 endforeach()
+# The beat tracker tests analyse minutes of synthesised audio, which is slow
+# under the sanitizers.
+set_tests_properties(beat_analyzer PROPERTIES TIMEOUT 600)
 
 if(TARGET soniclab_engine)
     # The C ABI exercised from C++, the same way ctypes calls it.

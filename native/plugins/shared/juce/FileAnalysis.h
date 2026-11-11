@@ -1,4 +1,4 @@
-// Offline analysis of an audio file dropped onto the editor.
+// Offline analysis of an audio file dropped onto a SonicLab plugin editor.
 //
 // Message thread: start(), clear(), snapshot(). A worker thread decodes the
 // file with JUCE's audio formats, builds a waveform overview, measures the
@@ -18,9 +18,14 @@
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
-#include "beat_analyzer/analysis_pipeline.h"
+#include "soniclab/analysis/analysis_pipeline.h"
 
-namespace soniclab::beat_analyzer {
+namespace soniclab::plugin {
+
+using analysis::AudioChunk;
+using analysis::kChunkFrames;
+using analysis::MarkerSink;
+using analysis::OnlineAnalyzer;
 
 struct FileAnalysisResult {
     enum class Status { Empty, Analysing, Done, Failed };
@@ -36,6 +41,7 @@ struct FileAnalysisResult {
     // Min and max of the mono downmix per bucket, kOverviewBuckets of them.
     std::vector<std::pair<float, float>> overview;
     std::vector<AnalysisMarker> markers;
+    analysis::AnalysisSummary summary;  // tempo and meter, when the analyzer reports them
 
     double lengthSeconds() const { return sampleRate > 0.0 ? static_cast<double>(lengthFrames) / sampleRate : 0.0; }
 };
@@ -58,6 +64,8 @@ public:
     static bool canAnalyse(const juce::File& file);
     // Upper-case extensions for display, for example "WAV, AIFF, FLAC, OGG".
     static juce::String supportedFormatsText();
+    // Wildcard list for a file dialog, for example "*.wav;*.aiff".
+    static juce::String chooserPattern();
 
     // Cancels any running analysis and starts on ``file``.
     void start(const juce::File& file);
@@ -84,4 +92,4 @@ private:
     FileAnalysisResult result_;
 };
 
-}  // namespace soniclab::beat_analyzer
+}  // namespace soniclab::plugin

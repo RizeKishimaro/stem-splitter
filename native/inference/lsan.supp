@@ -1,0 +1,6 @@
+# ONNX Runtime 1.20.1 keeps two process-lifetime allocations inside
+# libonnxruntime.so. The ASan stack for the 384-byte leak stops in that
+# library and does not pass through SonicLab frames. Tensor and session
+# leaks in this library still show up, because those allocations are
+# attributed to our sources.
+leak:libonnxruntime.so

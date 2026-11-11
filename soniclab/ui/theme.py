@@ -99,6 +99,32 @@ QToolButton#futureBtn {
 QToolButton#futureBtn:hover { background: #1A1E24; color: #8B939F; }
 QToolButton#armBtn:checked { color: #F4E4E4; background: #6A3034; border-color: #A65A5A; }
 QToolButton#recordBtn[recording="true"] { background: #6A3034; }
+QToolButton#panelBtn {
+    border: 1px solid #2A3038;
+    padding: 4px 10px;
+}
+QToolButton#panelBtn:hover { background: #222831; color: #F2F4F7; }
+QToolButton#panelBtn:disabled { color: #4E5660; border-color: #23282F; }
+QToolButton#primaryBtn {
+    background: #3A3424;
+    color: #F4E7CC;
+    border: 1px solid #8A7040;
+    padding: 4px 14px;
+}
+QToolButton#primaryBtn:hover { background: #4A4230; }
+QToolButton#primaryBtn:disabled { background: transparent; color: #4E5660; border-color: #23282F; }
+QToolButton#playStemBtn {
+    border: 1px solid #2A3038;
+    padding: 0;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 18px;
+    max-height: 18px;
+    font-size: 9px;
+}
+QToolButton#playStemBtn:hover { background: #222831; }
+QToolButton#playStemBtn:checked { color: #F4E7CC; background: #3A3424; border-color: #8A7040; }
+QToolButton#playStemBtn:disabled { color: #4E5660; border-color: #23282F; }
 QLabel { background: transparent; color: #E6E8EC; }
 QLabel#wordmark {
     color: #B7BCC4;
@@ -250,6 +276,8 @@ QSlider::handle:vertical {
 QCheckBox { color: #E6E8EC; spacing: 6px; }
 QCheckBox::indicator { width: 12px; height: 12px; border: 1px solid #3A424E; background: #0E1114; }
 QCheckBox::indicator:checked { background: #8A7040; border-color: #D7B36A; }
+QCheckBox:disabled { color: #5E6772; }
+QCheckBox::indicator:disabled { background: #12151A; border-color: #23282F; }
 """
 
 

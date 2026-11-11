@@ -1,0 +1,9 @@
+SonicLab
+
+1. Open the macos folder.
+2. Double-click "Install SonicLab.command".
+3. If the Mac says it cannot open the file, right-click it, choose Open, then Open.
+4. Leave the window alone until it says SonicLab is ready.
+5. Open SonicLab from Applications or the Desktop.
+
+You do not need to type commands or install developer tools yourself.

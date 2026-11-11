@@ -1,0 +1,1 @@
+"""SonicLab desktop audio editor."""
