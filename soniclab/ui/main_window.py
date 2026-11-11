@@ -41,7 +41,13 @@ from PySide6.QtWidgets import (
 from soniclab.core.alignment import classify_onsets, matched_errors, nudged_alignment
 from soniclab.core.audio_engine import OUTPUT_RATE, AudioEngine
 from soniclab.core.downbeat_loop import downbeat_loop_region, loop_shortcut
-from soniclab.core.bar_export import FORMATS, FORMATS_BY_KEY, bar_frames, default_name, write_audio
+from soniclab.core.bar_export import (
+    FORMATS,
+    FORMATS_BY_KEY,
+    bar_frames,
+    default_name,
+    write_audio,
+)
 from soniclab.core.bar_map import (
     bar_index,
     bar_span,
@@ -200,7 +206,9 @@ class MainWindow(QMainWindow):
         self.stem_bar.setTextVisible(False)
         self.stem_bar.setFixedHeight(8)
         self.stem_bar.setMinimumWidth(220)
-        self.stem_cancel = self._text_button("Cancel", "Stop splitting stems", self._cancel_stems)
+        self.stem_cancel = self._text_button(
+            "Cancel", "Stop splitting stems", self._cancel_stems
+        )
         row.addWidget(self.stem_label)
         row.addWidget(self.stem_bar, 1)
         row.addWidget(self.stem_cancel)
@@ -256,7 +264,9 @@ class MainWindow(QMainWindow):
         )
         self.loop_btn.setCheckable(True)
         bar.addWidget(self.loop_btn)
-        bar.addWidget(self._future_button(metronome_icon(), "The metronome is not available yet"))
+        bar.addWidget(
+            self._future_button(metronome_icon(), "The metronome is not available yet")
+        )
 
         self.bpm = QDoubleSpinBox()
         self.bpm.setRange(30, 300)
@@ -298,15 +308,27 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bar.addWidget(spacer)
 
-        zoom_out = self._text_button("−", "Zoom out", lambda: self.timeline.zoom_horizontal(1 / 1.1))
-        zoom_in = self._text_button("+", "Zoom in", lambda: self.timeline.zoom_horizontal(1.1))
-        lanes_out = self._text_button("▴", "Shorter tracks", lambda: self.timeline.zoom_vertical(1 / 1.08))
-        lanes_in = self._text_button("▾", "Taller tracks", lambda: self.timeline.zoom_vertical(1.08))
+        zoom_out = self._text_button(
+            "−", "Zoom out", lambda: self.timeline.zoom_horizontal(1 / 1.1)
+        )
+        zoom_in = self._text_button(
+            "+", "Zoom in", lambda: self.timeline.zoom_horizontal(1.1)
+        )
+        lanes_out = self._text_button(
+            "▴", "Shorter tracks", lambda: self.timeline.zoom_vertical(1 / 1.08)
+        )
+        lanes_in = self._text_button(
+            "▾", "Taller tracks", lambda: self.timeline.zoom_vertical(1.08)
+        )
         for button in (zoom_out, zoom_in, lanes_out, lanes_in):
             bar.addWidget(button)
 
-        self.import_btn = self._text_button("Import", "Import audio", self._import_audio)
-        self.add_track_btn = self._text_button("Add Track", "Add an empty track", self._add_empty_track)
+        self.import_btn = self._text_button(
+            "Import", "Import audio", self._import_audio
+        )
+        self.add_track_btn = self._text_button(
+            "Add Track", "Add an empty track", self._add_empty_track
+        )
         bar.addWidget(self.import_btn)
         bar.addWidget(self.add_track_btn)
 
@@ -323,7 +345,9 @@ class MainWindow(QMainWindow):
         return button
 
     def _future_button(self, icon, message) -> QToolButton:
-        return self._tool_button(icon, message, lambda: self._unavailable(message), "futureBtn")
+        return self._tool_button(
+            icon, message, lambda: self._unavailable(message), "futureBtn"
+        )
 
     def _text_button(self, text, tip, slot) -> QToolButton:
         button = QToolButton()
@@ -349,11 +373,17 @@ class MainWindow(QMainWindow):
         self.visualizer_dock = self._dock("Visualizer", self.visualizer, features)
         self.visualizer_dock.setObjectName("visualizerDock")
         self.stem_splitter = StemSplitterPanel()
-        self.stem_splitter.default_folder = lambda: default_stem_folder(self.current_path)
+        self.stem_splitter.default_folder = lambda: default_stem_folder(
+            self.current_path
+        )
         self.stem_splitter.busy_elsewhere = lambda: self.stem_jobs.pending() > 0
         self.stem_splitter.add_requested.connect(self._add_split_stems)
-        self.stem_splitter.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
-        self.stem_splitter_dock = self._dock("Stem Splitter", self.stem_splitter, features)
+        self.stem_splitter.message.connect(
+            lambda text: self.statusBar().showMessage(text, 8000)
+        )
+        self.stem_splitter_dock = self._dock(
+            "Stem Splitter", self.stem_splitter, features
+        )
         self.stem_splitter_dock.setObjectName("stemSplitterDock")
         self.browser_dock.setMinimumWidth(200)
         self.inspector_dock.setMinimumWidth(240)
@@ -362,13 +392,21 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.inspector_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.mixer_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.visualizer_dock)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.stem_splitter_dock)
+        self.addDockWidget(
+            Qt.DockWidgetArea.BottomDockWidgetArea, self.stem_splitter_dock
+        )
         self.tabifyDockWidget(self.mixer_dock, self.visualizer_dock)
         self.tabifyDockWidget(self.visualizer_dock, self.stem_splitter_dock)
         self.mixer_dock.raise_()
         self.visualizer_dock.visibilityChanged.connect(self._sync_capture)
-        self.resizeDocks([self.browser_dock, self.inspector_dock], [240, 260], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.mixer_dock, self.visualizer_dock], [236, 220], Qt.Orientation.Vertical)
+        self.resizeDocks(
+            [self.browser_dock, self.inspector_dock],
+            [240, 260],
+            Qt.Orientation.Horizontal,
+        )
+        self.resizeDocks(
+            [self.mixer_dock, self.visualizer_dock], [236, 220], Qt.Orientation.Vertical
+        )
 
     def _dock(self, title, widget, features) -> QDockWidget:
         dock = QDockWidget(title, self)
@@ -385,39 +423,73 @@ class MainWindow(QMainWindow):
 
     def _build_menus(self):
         file_menu = self.menuBar().addMenu("&File")
-        self._action(file_menu, "&New Session", self._new_project, QKeySequence.StandardKey.New)
-        self._action(file_menu, "&Open Project…", self._open_project, QKeySequence.StandardKey.Open)
+        self._action(
+            file_menu, "&New Session", self._new_project, QKeySequence.StandardKey.New
+        )
+        self._action(
+            file_menu,
+            "&Open Project…",
+            self._open_project,
+            QKeySequence.StandardKey.Open,
+        )
         recent = file_menu.addMenu("Open Recent")
         recent.aboutToShow.connect(lambda: self._fill_recent_menu(recent))
         file_menu.addSeparator()
-        self._action(file_menu, "&Save Project", self._save_project, QKeySequence.StandardKey.Save)
-        self._action(file_menu, "Save Project &As…", self._save_project_as, QKeySequence.StandardKey.SaveAs)
+        self._action(
+            file_menu,
+            "&Save Project",
+            self._save_project,
+            QKeySequence.StandardKey.Save,
+        )
+        self._action(
+            file_menu,
+            "Save Project &As…",
+            self._save_project_as,
+            QKeySequence.StandardKey.SaveAs,
+        )
         file_menu.addSeparator()
-        self._action(file_menu, "&Import Audio…", self._import_audio, QKeySequence("Ctrl+I"))
+        self._action(
+            file_menu, "&Import Audio…", self._import_audio, QKeySequence("Ctrl+I")
+        )
         self.split_on_import_action = QAction("Split Songs into Stems on Import", self)
         self.split_on_import_action.setCheckable(True)
-        self.split_on_import_action.setToolTip("Run Demucs on imported songs and add drums, bass, other and vocals")
+        self.split_on_import_action.setToolTip(
+            "Run Demucs on imported songs and add drums, bass, other and vocals"
+        )
         stored = QSettings("SonicLab", "SonicLab").value("import/splitStems", True)
-        self.split_on_import_action.setChecked(str(stored).lower() not in ("false", "0"))
+        self.split_on_import_action.setChecked(
+            str(stored).lower() not in ("false", "0")
+        )
         self.split_on_import_action.toggled.connect(
-            lambda checked: QSettings("SonicLab", "SonicLab").setValue("import/splitStems", bool(checked))
+            lambda checked: QSettings("SonicLab", "SonicLab").setValue(
+                "import/splitStems", bool(checked)
+            )
         )
         file_menu.addAction(self.split_on_import_action)
         self._action(file_menu, "Stem Splitter…", self._show_stem_splitter)
         file_menu.addSeparator()
         self.export_bars_action = self._action(
-            file_menu, "Export Bars…", lambda: self._export_bars(), QKeySequence("Ctrl+Shift+E")
+            file_menu,
+            "Export Bars…",
+            lambda: self._export_bars(),
+            QKeySequence("Ctrl+Shift+E"),
         )
         file_menu.addSeparator()
         self._action(file_menu, "&Quit", self.close, QKeySequence.StandardKey.Quit)
 
         edit_menu = self.menuBar().addMenu("&Edit")
-        self.undo_action = self._action(edit_menu, "&Undo", self._undo, QKeySequence.StandardKey.Undo)
-        self.redo_action = self._action(edit_menu, "&Redo", self._redo, QKeySequence.StandardKey.Redo)
+        self.undo_action = self._action(
+            edit_menu, "&Undo", self._undo, QKeySequence.StandardKey.Undo
+        )
+        self.redo_action = self._action(
+            edit_menu, "&Redo", self._redo, QKeySequence.StandardKey.Redo
+        )
         self.undo_action.setEnabled(False)
         self.redo_action.setEnabled(False)
         edit_menu.addSeparator()
-        self.rename_action = self._action(edit_menu, "Rename Track…", self._rename_track)
+        self.rename_action = self._action(
+            edit_menu, "Rename Track…", self._rename_track
+        )
         self.delete_action = self._action(edit_menu, "Delete Track", self._delete_track)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -448,16 +520,34 @@ class MainWindow(QMainWindow):
         self.onsets_action.setToolTip("Show onset timing against the beat reference")
         self.onsets_action.toggled.connect(self.timeline.set_show_onsets)
         view_menu.addAction(self.onsets_action)
-        self._action(view_menu, "Zoom In", lambda: self.timeline.zoom_horizontal(1.1), QKeySequence.StandardKey.ZoomIn)
-        self._action(view_menu, "Zoom Out", lambda: self.timeline.zoom_horizontal(1 / 1.1), QKeySequence.StandardKey.ZoomOut)
-        self._action(view_menu, "Reset Zoom", self.timeline.reset_zoom, QKeySequence("Ctrl+0"))
+        self._action(
+            view_menu,
+            "Zoom In",
+            lambda: self.timeline.zoom_horizontal(1.1),
+            QKeySequence.StandardKey.ZoomIn,
+        )
+        self._action(
+            view_menu,
+            "Zoom Out",
+            lambda: self.timeline.zoom_horizontal(1 / 1.1),
+            QKeySequence.StandardKey.ZoomOut,
+        )
+        self._action(
+            view_menu, "Reset Zoom", self.timeline.reset_zoom, QKeySequence("Ctrl+0")
+        )
         view_menu.addSeparator()
-        self._action(view_menu, "Taller Tracks", lambda: self.timeline.zoom_vertical(1.08))
-        self._action(view_menu, "Shorter Tracks", lambda: self.timeline.zoom_vertical(1 / 1.08))
+        self._action(
+            view_menu, "Taller Tracks", lambda: self.timeline.zoom_vertical(1.08)
+        )
+        self._action(
+            view_menu, "Shorter Tracks", lambda: self.timeline.zoom_vertical(1 / 1.08)
+        )
         self._action(view_menu, "Reset Track Height", self.timeline.reset_track_heights)
 
         track_menu = self.menuBar().addMenu("&Track")
-        self._action(track_menu, "Add Track…", self._add_empty_track, QKeySequence("Ctrl+T"))
+        self._action(
+            track_menu, "Add Track…", self._add_empty_track, QKeySequence("Ctrl+T")
+        )
         track_menu.addAction(self.rename_action)
         track_menu.addAction(self.delete_action)
         track_menu.addSeparator()
@@ -470,23 +560,43 @@ class MainWindow(QMainWindow):
         track_menu.addAction(self.mute_action)
         track_menu.addAction(self.solo_action)
         track_menu.addSeparator()
-        self.move_up_action = self._action(track_menu, "Move Up", lambda: self._move_track(-1))
-        self.move_down_action = self._action(track_menu, "Move Down", lambda: self._move_track(1))
+        self.move_up_action = self._action(
+            track_menu, "Move Up", lambda: self._move_track(-1)
+        )
+        self.move_down_action = self._action(
+            track_menu, "Move Down", lambda: self._move_track(1)
+        )
 
         clip_menu = self.menuBar().addMenu("&Clip")
         clip_menu.addAction(self.rename_action)
-        self.move_start_action = self._action(clip_menu, "Move to Start", self._move_selection_to_start)
-        self.split_action = self._action(clip_menu, "Split at Playhead", self._split_selected, QKeySequence("Ctrl+E"))
-        self.duplicate_action = self._action(clip_menu, "Duplicate", self._duplicate_selected, QKeySequence("Ctrl+D"))
+        self.move_start_action = self._action(
+            clip_menu, "Move to Start", self._move_selection_to_start
+        )
+        self.split_action = self._action(
+            clip_menu, "Split at Playhead", self._split_selected, QKeySequence("Ctrl+E")
+        )
+        self.duplicate_action = self._action(
+            clip_menu, "Duplicate", self._duplicate_selected, QKeySequence("Ctrl+D")
+        )
         clip_menu.addSeparator()
-        self.analyze_action = self._action(clip_menu, "Analyze Downbeats", self._analyze_beats)
-        self.onset_action = self._action(clip_menu, "Analyze Onsets", self._analyze_onsets)
-        self.reference_action = self._action(clip_menu, "Set Beat Reference", self._set_beat_reference)
-        self.nudge_action = self._action(clip_menu, "Nudge to Reference", self._nudge_to_reference)
+        self.analyze_action = self._action(
+            clip_menu, "Analyze Downbeats", self._analyze_beats
+        )
+        self.onset_action = self._action(
+            clip_menu, "Analyze Onsets", self._analyze_onsets
+        )
+        self.reference_action = self._action(
+            clip_menu, "Set Beat Reference", self._set_beat_reference
+        )
+        self.nudge_action = self._action(
+            clip_menu, "Nudge to Reference", self._nudge_to_reference
+        )
         clip_menu.addSeparator()
         downbeat_menu = clip_menu.addMenu("Downbeat Markers")
         self.apply_downbeats_action = self._action(
-            downbeat_menu, "Apply to Other Tracks…", lambda: self._apply_downbeats_to_tracks()
+            downbeat_menu,
+            "Apply to Other Tracks…",
+            lambda: self._apply_downbeats_to_tracks(),
         )
         # Lambdas: triggered(checked) would otherwise fill the optional argument.
         self.export_downbeats_action = self._action(
@@ -518,7 +628,9 @@ class MainWindow(QMainWindow):
         settings = QSettings("SonicLab", "SonicLab")
         self.loop_actions = []
         for intervals in (1, 2, 3, 4):
-            label = "Loop 1 Downbeat" if intervals == 1 else f"Loop {intervals} Downbeats"
+            label = (
+                "Loop 1 Downbeat" if intervals == 1 else f"Loop {intervals} Downbeats"
+            )
             action = self._action(
                 audio_menu,
                 label,
@@ -530,11 +642,23 @@ class MainWindow(QMainWindow):
         audio_menu.addAction(self._unavailable_action("Metronome"))
 
         bars_menu = self.menuBar().addMenu("&Bars")
-        self._action(bars_menu, "Edit Bar at Playhead…", lambda: self._edit_bar(), QKeySequence("Ctrl+B"))
-        self._action(bars_menu, "Add Bar Line at Playhead", self._add_bar_line, QKeySequence("Ctrl+Shift+B"))
+        self._action(
+            bars_menu,
+            "Edit Bar at Playhead…",
+            lambda: self._edit_bar(),
+            QKeySequence("Ctrl+B"),
+        )
+        self._action(
+            bars_menu,
+            "Add Bar Line at Playhead",
+            self._add_bar_line,
+            QKeySequence("Ctrl+Shift+B"),
+        )
         self._action(bars_menu, "Remove Nearest Bar Line", self._remove_bar_line)
         bars_menu.addSeparator()
-        self._action(bars_menu, "Mark Bars at Drum Downbeats", self._mark_bars_from_drums)
+        self._action(
+            bars_menu, "Mark Bars at Drum Downbeats", self._mark_bars_from_drums
+        )
         self._action(bars_menu, "Reset Bars", self._reset_bars)
         bars_menu.addSeparator()
         bars_menu.addAction(self.export_bars_action)
@@ -577,13 +701,21 @@ class MainWindow(QMainWindow):
         self.timeline.seek_requested.connect(self.engine.seek)
         self.timeline.track_selected.connect(self._on_track_selected)
         self.timeline.layout_changed.connect(self._rebuild_side_panels)
-        self.timeline.bars_changed.connect(lambda lines: self._set_bars(lines, "Bar line moved"))
+        self.timeline.bars_changed.connect(
+            lambda lines: self._set_bars(lines, "Bar line moved")
+        )
         self.timeline.bar_edit_requested.connect(self._edit_bar)
         self.timeline.bars_selected.connect(self._select_bars)
-        self.timeline.viewport().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.timeline.viewport().customContextMenuRequested.connect(self._clip_context_menu)
+        self.timeline.viewport().setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.timeline.viewport().customContextMenuRequested.connect(
+            self._clip_context_menu
+        )
         self.timeline.verticalScrollBar().valueChanged.connect(self._sync_from_timeline)
-        self.headers.scroll.verticalScrollBar().valueChanged.connect(self._sync_from_headers)
+        self.headers.scroll.verticalScrollBar().valueChanged.connect(
+            self._sync_from_headers
+        )
         self.headers.selected.connect(self._select_track)
         self.headers.gain_changed.connect(self._set_gain)
         self.headers.pan_changed.connect(self._set_pan)
@@ -603,13 +735,25 @@ class MainWindow(QMainWindow):
         self.browser.recent_activated.connect(self._open_recent)
         self.inspector.name_edited.connect(self._rename_track_to)
         self.inspector.start_edited.connect(self._set_start)
-        self.inspector.gain_edited.connect(lambda gain: self._set_gain(self._selected, gain))
-        self.inspector.pan_edited.connect(lambda pan: self._set_pan(self._selected, pan))
-        self.inspector.mute_edited.connect(lambda muted: self._set_muted(self._selected, muted))
-        self.inspector.solo_edited.connect(lambda solo: self._set_solo(self._selected, solo))
+        self.inspector.gain_edited.connect(
+            lambda gain: self._set_gain(self._selected, gain)
+        )
+        self.inspector.pan_edited.connect(
+            lambda pan: self._set_pan(self._selected, pan)
+        )
+        self.inspector.mute_edited.connect(
+            lambda muted: self._set_muted(self._selected, muted)
+        )
+        self.inspector.solo_edited.connect(
+            lambda solo: self._set_solo(self._selected, solo)
+        )
         self.inspector.clip_gain_edited.connect(self._set_clip_gain)
-        self.inspector.fade_in_edited.connect(lambda value: self._set_fade("fade_in", value))
-        self.inspector.fade_out_edited.connect(lambda value: self._set_fade("fade_out", value))
+        self.inspector.fade_in_edited.connect(
+            lambda value: self._set_fade("fade_in", value)
+        )
+        self.inspector.fade_out_edited.connect(
+            lambda value: self._set_fade("fade_out", value)
+        )
         self.inspector.edit_finished.connect(self._commit_edit)
         self.visualizer.set_reader(self._read_visualizer)
 
@@ -620,7 +764,11 @@ class MainWindow(QMainWindow):
             event_type = event.type()
         except (AttributeError, RuntimeError, TypeError):
             return False
-        if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+        if event_type in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.Drop,
+        ):
             return self._handle_drop_event(watched, event_type, event)
         if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
             if QApplication.activeModalWidget() is not None:
@@ -639,7 +787,10 @@ class MainWindow(QMainWindow):
                 return False
             self._delete_track()
             return True
-        if event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() in ARROW_KEYS:
+        if (
+            event_type in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease)
+            and event.key() in ARROW_KEYS
+        ):
             return self._handle_arrow_key(event_type, event)
         return False
 
@@ -649,12 +800,24 @@ class MainWindow(QMainWindow):
         Text fields, spin boxes, lists and sliders keep their own arrow keys,
         and so do arrows with a modifier held.
         """
-        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+        if (
+            QApplication.activeModalWidget() is not None
+            or QApplication.activePopupWidget() is not None
+        ):
             return False
         if event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier:
             return False
         focused = QApplication.focusWidget()
-        if isinstance(focused, (QLineEdit, QAbstractSpinBox, QComboBox, QAbstractSlider, QAbstractItemView)):
+        if isinstance(
+            focused,
+            (
+                QLineEdit,
+                QAbstractSpinBox,
+                QComboBox,
+                QAbstractSlider,
+                QAbstractItemView,
+            ),
+        ):
             return False
         key = event.key()
         if event_type == QEvent.Type.KeyRelease:
@@ -674,7 +837,10 @@ class MainWindow(QMainWindow):
 
     def _seek_by(self, seconds: float) -> None:
         end = max(
-            [float(t.get("start", 0.0) or 0.0) + float(t.get("duration", 0.0) or 0.0) for t in self.project.tracks]
+            [
+                float(t.get("start", 0.0) or 0.0) + float(t.get("duration", 0.0) or 0.0)
+                for t in self.project.tracks
+            ]
             + [0.0]
         )
         target = max(0.0, float(self.engine.position) + float(seconds))
@@ -682,7 +848,9 @@ class MainWindow(QMainWindow):
             target = min(target, end)
         self.engine.seek(target)
         self._refresh_transport()
-        self.statusBar().showMessage(f"{'⏪' if seconds < 0 else '⏩'} {format_clock(target)}", 1500)
+        self.statusBar().showMessage(
+            f"{'⏪' if seconds < 0 else '⏩'} {format_clock(target)}", 1500
+        )
 
     def _step_master_volume(self, step: float) -> None:
         # Round to whole percent so repeated steps land on 10%, 20%, …
@@ -726,10 +894,16 @@ class MainWindow(QMainWindow):
         for path in paths:
             name = os.path.splitext(os.path.basename(path))[0]
             source = os.path.abspath(path)
-            wants_split = split and self.split_on_import_action.isChecked() and not is_stem_name(name)
+            wants_split = (
+                split
+                and self.split_on_import_action.isChecked()
+                and not is_stem_name(name)
+            )
             try:
                 if wants_split:
-                    stems = existing_stems(source, default_stem_folder(self.current_path))
+                    stems = existing_stems(
+                        source, default_stem_folder(self.current_path)
+                    )
                     if stems is not None:
                         self._add_stem_tracks(name, stems)
                         imported.extend(stems[stem] for stem in STEMS)
@@ -737,7 +911,9 @@ class MainWindow(QMainWindow):
                         added = True
                         continue
                     if self.stem_jobs.available:
-                        job = self.stem_jobs.submit(source, default_stem_folder(self.current_path))
+                        job = self.stem_jobs.submit(
+                            source, default_stem_folder(self.current_path)
+                        )
                         self._stem_names[job] = name
                         self._stem_sources[job] = source
                         splitting.append(name)
@@ -829,7 +1005,8 @@ class MainWindow(QMainWindow):
         drum = self._drum_index()
         lead = self.project.tracks[drum].get("name") if drum is not None else "none"
         self.statusBar().showMessage(
-            f"Added {len(added)} stem{'s' if len(added) != 1 else ''} of “{name}”. Drum track: {lead}", 10000
+            f"Added {len(added)} stem{'s' if len(added) != 1 else ''} of “{name}”. Drum track: {lead}",
+            10000,
         )
 
     def _show_stem_progress(self, fraction: float | None) -> None:
@@ -875,8 +1052,12 @@ class MainWindow(QMainWindow):
             if source and not cancelled:
                 # Never leave the user with nothing: fall back to the song.
                 self._import_paths([source], split=False)
-            text = f"Stem split of “{name}” cancelled" if cancelled else (
-                f"Could not split “{name}”: {result.message or 'Demucs failed'}. Imported the full song"
+            text = (
+                f"Stem split of “{name}” cancelled"
+                if cancelled
+                else (
+                    f"Could not split “{name}”: {result.message or 'Demucs failed'}. Imported the full song"
+                )
             )
             self.statusBar().showMessage(text, 10000)
             return
@@ -1039,7 +1220,10 @@ class MainWindow(QMainWindow):
     def _musical_position(self, seconds):
         numerator, _denominator = parse_time_signature(self.signature.currentText())
         bar, beat_in_bar = bar_position(
-            self.timeline.bar_lines, float(seconds), numerator, self.timeline.bar_fallback
+            self.timeline.bar_lines,
+            float(seconds),
+            numerator,
+            self.timeline.bar_fallback,
         )
         return f"{bar:03d}.{beat_in_bar}"
 
@@ -1114,11 +1298,15 @@ class MainWindow(QMainWindow):
                     4000,
                 )
             else:
-                self.statusBar().showMessage("This clip has no detected downbeats", 4000)
+                self.statusBar().showMessage(
+                    "This clip has no detected downbeats", 4000
+                )
             return
         self._engage_loop(region[0], region[1], intervals)
 
-    def _engage_loop(self, start: float, end: float, intervals: int | None = None) -> None:
+    def _engage_loop(
+        self, start: float, end: float, intervals: int | None = None
+    ) -> None:
         if not self.engine.set_loop(start, end):
             self.statusBar().showMessage("Could not set the loop region", 4000)
             return
@@ -1210,7 +1398,9 @@ class MainWindow(QMainWindow):
         self.reference_action.setEnabled(has)
         self.nudge_action.setEnabled(has)
         self.downbeat_menu.setEnabled(has)
-        has_events = has and bool(self._track_events(self.project.tracks[self._selected]))
+        has_events = has and bool(
+            self._track_events(self.project.tracks[self._selected])
+        )
         self.apply_downbeats_action.setEnabled(has_events and count > 1)
         self.export_downbeats_action.setEnabled(has_events)
         self.import_downbeats_action.setEnabled(has)
@@ -1337,7 +1527,9 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self.project.tracks)):
             return
         current = self.project.tracks[index].get("name", "")
-        name, ok = QInputDialog.getText(self, "Rename track", "Track name:", text=current)
+        name, ok = QInputDialog.getText(
+            self, "Rename track", "Track name:", text=current
+        )
         if ok:
             self._rename_track_to(name)
 
@@ -1598,7 +1790,9 @@ class MainWindow(QMainWindow):
                 label += "  (missing)"
             action = QAction(label, self)
             action.setToolTip(path)
-            action.triggered.connect(lambda _checked=False, item=path: self._open_recent(item))
+            action.triggered.connect(
+                lambda _checked=False, item=path: self._open_recent(item)
+            )
             menu.addAction(action)
 
     def _selection(self) -> list[int]:
@@ -1746,12 +1940,18 @@ class MainWindow(QMainWindow):
                 delta = float(self.project.tracks[index].get("start", 0.0)) - float(
                     old_tracks[index].get("start", 0.0)
                 )
-                others = [item for item in self.timeline.selected_indices() if item != index]
+                others = [
+                    item for item in self.timeline.selected_indices() if item != index
+                ]
                 if abs(delta) > 1e-6 and others:
                     for other in others:
-                        if other >= len(self.project.tracks) or other >= len(old_tracks):
+                        if other >= len(self.project.tracks) or other >= len(
+                            old_tracks
+                        ):
                             continue
-                        start = max(0.0, float(old_tracks[other].get("start", 0.0)) + delta)
+                        start = max(
+                            0.0, float(old_tracks[other].get("start", 0.0)) + delta
+                        )
                         self.project.tracks[other]["start"] = start
                         self.engine.set_clip_start(other, start)
                     self._refresh_timeline()
@@ -1763,7 +1963,9 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         track = self.project.tracks[index]
         old_start = float(track.get("start", 0.0))
-        offset = max(0.0, float(track.get("offset", 0.0) or 0.0) + float(start) - old_start)
+        offset = max(
+            0.0, float(track.get("offset", 0.0) or 0.0) + float(start) - old_start
+        )
         audio = track.get("_audio")
         file_seconds = (
             len(audio) / OUTPUT_RATE
@@ -1789,7 +1991,9 @@ class MainWindow(QMainWindow):
         duration = float(track.get("duration", 0.0) or 0.0)
         local = float(self.engine.position) - start
         if local <= 0.05 or local >= duration - 0.05:
-            self.statusBar().showMessage("Move the playhead inside the clip to split", 3000)
+            self.statusBar().showMessage(
+                "Move the playhead inside the clip to split", 3000
+            )
             return
         self._remember_edit()
         tail = dict(track)
@@ -1828,7 +2032,10 @@ class MainWindow(QMainWindow):
     def _move_track(self, direction: int) -> None:
         index = self._selected
         target = index + direction
-        if not (0 <= index < len(self.project.tracks) and 0 <= target < len(self.project.tracks)):
+        if not (
+            0 <= index < len(self.project.tracks)
+            and 0 <= target < len(self.project.tracks)
+        ):
             return
         self._remember_edit()
         tracks = self.project.tracks
@@ -1893,7 +2100,11 @@ class MainWindow(QMainWindow):
         if self.recorder.recording:
             self._stop_recording()
             return
-        armed = [index for index, track in enumerate(self.project.tracks) if track.get("armed")]
+        armed = [
+            index
+            for index, track in enumerate(self.project.tracks)
+            if track.get("armed")
+        ]
         if not armed:
             self.statusBar().showMessage("Arm a track before recording", 4000)
             return
@@ -1975,14 +2186,18 @@ class MainWindow(QMainWindow):
         path = self.project.tracks[index].get("path")
         state = self.beat_jobs.submit(path)
         if state == "missing":
-            self.statusBar().showMessage("This clip has no source file to analyze", 4000)
+            self.statusBar().showMessage(
+                "This clip has no source file to analyze", 4000
+            )
             return
         if state == "duplicate":
             self.statusBar().showMessage("Beat analysis is already queued", 3000)
             return
         if state == "ready":
             self._apply_detected_beats()
-            self.statusBar().showMessage(self._beat_status(self.beat_jobs.result_for(path)), 5000)
+            self.statusBar().showMessage(
+                self._beat_status(self.beat_jobs.result_for(path)), 5000
+            )
             return
         self.statusBar().showMessage("Analyzing downbeats…", 3000)
 
@@ -2008,7 +2223,9 @@ class MainWindow(QMainWindow):
         path = self.project.tracks[index].get("path")
         state = self.onset_jobs.submit(path)
         if state == "missing":
-            self.statusBar().showMessage("This clip has no source file to analyze", 4000)
+            self.statusBar().showMessage(
+                "This clip has no source file to analyze", 4000
+            )
             return
         if state == "duplicate":
             self.statusBar().showMessage("Onset analysis is already queued", 3000)
@@ -2028,15 +2245,25 @@ class MainWindow(QMainWindow):
             if message[0] == "finished":
                 self._apply_onsets()
                 result = message[2]
-                if getattr(result, "status", "") in ("error", "unavailable", "cancelled"):
-                    self.statusBar().showMessage(result.message or "Onset analysis failed", 4000)
+                if getattr(result, "status", "") in (
+                    "error",
+                    "unavailable",
+                    "cancelled",
+                ):
+                    self.statusBar().showMessage(
+                        result.message or "Onset analysis failed", 4000
+                    )
                 else:
-                    self.statusBar().showMessage(self._onset_status(len(result.onsets)), 4000)
+                    self.statusBar().showMessage(
+                        self._onset_status(len(result.onsets)), 4000
+                    )
 
     def _set_beat_reference(self) -> None:
         index = self._selected
         if not (0 <= index < len(self.project.tracks)):
-            self.statusBar().showMessage("Select a clip to use as the beat reference", 3000)
+            self.statusBar().showMessage(
+                "Select a clip to use as the beat reference", 3000
+            )
             return
         for track_index, track in enumerate(self.project.tracks):
             if track_index == index:
@@ -2270,7 +2497,9 @@ class MainWindow(QMainWindow):
 
         def show_length() -> None:
             try:
-                length.setText(f"{parse_clock(end_edit.text()) - parse_clock(start_edit.text()):.2f} s")
+                length.setText(
+                    f"{parse_clock(end_edit.text()) - parse_clock(start_edit.text()):.2f} s"
+                )
             except ValueError:
                 length.setText("—")
 
@@ -2295,16 +2524,22 @@ class MainWindow(QMainWindow):
     def _apply_bar_span(self, index: int, start_text: str, end_text: str) -> bool:
         try:
             start, end = parse_clock(start_text), parse_clock(end_text)
-            lines = set_span(self._current_bar_lines(), index, start, end, self.timeline.bar_fallback)
+            lines = set_span(
+                self._current_bar_lines(), index, start, end, self.timeline.bar_fallback
+            )
         except ValueError as exc:
             self.statusBar().showMessage(f"Bar {index + 1} not changed: {exc}", 5000)
             return False
-        self._set_bars(lines, f"Bar {index + 1}: {format_clock(start)} – {format_clock(end)}")
+        self._set_bars(
+            lines, f"Bar {index + 1}: {format_clock(start)} – {format_clock(end)}"
+        )
         return True
 
     def _current_bar_lines(self) -> list[float]:
         # The bars on screen, with the tempo grid made real when nothing is placed.
-        return list(self.project.bars or self.timeline.bar_map or self.timeline.bar_lines)
+        return list(
+            self.project.bars or self.timeline.bar_map or self.timeline.bar_lines
+        )
 
     def _add_bar_line(self) -> None:
         seconds = float(self.engine.position)
@@ -2318,12 +2553,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Keep at least two bar lines", 3000)
             return
         removed = lines[index]
-        self._set_bars(remove_line(lines, index), f"Bar line at {format_clock(removed)} removed")
+        self._set_bars(
+            remove_line(lines, index), f"Bar line at {format_clock(removed)} removed"
+        )
 
     def _mark_bars_from_drums(self) -> None:
         lines = self._drum_bar_lines()
         if not lines:
-            self.statusBar().showMessage("No drum downbeats yet. Mark a drum track and analyze it", 5000)
+            self.statusBar().showMessage(
+                "No drum downbeats yet. Mark a drum track and analyze it", 5000
+            )
             return
         self._set_bars(lines, f"Marked {len(lines) - 1} bars at the drum downbeats")
 
@@ -2339,7 +2578,8 @@ class MainWindow(QMainWindow):
         self._engage_loop(start, end)
         label = f"Bar {first + 1}" if first == last else f"Bars {first + 1}–{last + 1}"
         self.statusBar().showMessage(
-            f"{label} selected · {format_clock(start)} – {format_clock(end)} · Ctrl+Shift+E to export", 6000
+            f"{label} selected · {format_clock(start)} – {format_clock(end)} · Ctrl+Shift+E to export",
+            6000,
         )
 
     def _selected_bars(self) -> tuple[int, int]:
@@ -2372,7 +2612,9 @@ class MainWindow(QMainWindow):
             low, high = sorted((start_bar.value() - 1, end_bar.value() - 1))
             start, _end = bar_span(lines, low, fallback)
             _start, end = bar_span(lines, high, fallback)
-            span.setText(f"{format_clock(start)} – {format_clock(end)}  ({end - start:.3f} s)")
+            span.setText(
+                f"{format_clock(start)} – {format_clock(end)}  ({end - start:.3f} s)"
+            )
 
         start_bar.valueChanged.connect(show_span)
         end_bar.valueChanged.connect(show_span)
@@ -2391,7 +2633,9 @@ class MainWindow(QMainWindow):
         form.addRow("Time", span)
         form.addRow("Content", content)
         form.addRow("Format", formats)
-        note = QLabel("Mute, solo, volume, pan, fades and master level are applied as you hear them.")
+        note = QLabel(
+            "Mute, solo, volume, pan, fades and master level are applied as you hear them."
+        )
         note.setWordWrap(True)
         form.addRow(note)
         buttons = QDialogButtonBox(
@@ -2415,7 +2659,9 @@ class MainWindow(QMainWindow):
             return os.path.dirname(self.current_path)
         return os.path.expanduser("~")
 
-    def _export_bars(self, first=None, last=None, format_key=None, content="mix", target=None) -> list:
+    def _export_bars(
+        self, first=None, last=None, format_key=None, content="mix", target=None
+    ) -> list:
         """Render bars ``first``..``last`` (zero-based) and write them.
 
         ``target`` is a file path, or a folder for ``content == "each"``.
@@ -2442,7 +2688,11 @@ class MainWindow(QMainWindow):
             soloed = any(track.get("solo") for track in tracks)
             jobs, used = [], set()
             for index, track in enumerate(tracks):
-                if track.get("empty") or track.get("muted") or (soloed and not track.get("solo")):
+                if (
+                    track.get("empty")
+                    or track.get("muted")
+                    or (soloed and not track.get("solo"))
+                ):
                     continue
                 label = track.get("name") or f"Track {index + 1}"
                 if label.lower() in used:
@@ -2458,7 +2708,9 @@ class MainWindow(QMainWindow):
         if target is None:
             folder = self._export_folder()
             if content == "each":
-                target = QFileDialog.getExistingDirectory(self, "Export each track to", folder)
+                target = QFileDialog.getExistingDirectory(
+                    self, "Export each track to", folder
+                )
             else:
                 target, _ = QFileDialog.getSaveFileName(
                     self,
@@ -2469,15 +2721,26 @@ class MainWindow(QMainWindow):
             if not target:
                 return []
             QSettings("SonicLab", "SonicLab").setValue(
-                "export/folder", target if content == "each" else os.path.dirname(target)
+                "export/folder",
+                target if content == "each" else os.path.dirname(target),
             )
-        start, end = bar_frames(self.timeline.bar_lines, first, last, self.timeline.bar_fallback, OUTPUT_RATE)
+        start, end = bar_frames(
+            self.timeline.bar_lines,
+            first,
+            last,
+            self.timeline.bar_fallback,
+            OUTPUT_RATE,
+        )
         results = []
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for include, track_name in jobs:
                 audio = self.engine.render(start, end - start, include)
-                path = os.path.join(target, default_name(name, first, last, track_name)) if track_name else target
+                path = (
+                    os.path.join(target, default_name(name, first, last, track_name))
+                    if track_name
+                    else target
+                )
                 results.append(write_audio(path, audio, OUTPUT_RATE, fmt))
         except (OSError, ValueError, RuntimeError, sf.LibsndfileError) as exc:
             QMessageBox.warning(self, "Export failed", str(exc))
@@ -2485,7 +2748,11 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         bars = f"bar {first + 1}" if first == last else f"bars {first + 1}–{last + 1}"
-        where = os.path.basename(str(results[0].path)) if len(results) == 1 else f"{len(results)} files in {target}"
+        where = (
+            os.path.basename(str(results[0].path))
+            if len(results) == 1
+            else f"{len(results)} files in {target}"
+        )
         message = f"Exported {bars} ({(end - start) / OUTPUT_RATE:.3f} s) to {where}"
         clipped = sum(result.clipped for result in results)
         if clipped:
@@ -2510,7 +2777,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             checked = index in chosen if chosen else True
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
             targets.addItem(item)
         form.addRow(targets)
         buttons = QDialogButtonBox(
@@ -2541,7 +2810,9 @@ class MainWindow(QMainWindow):
             targets = self._downbeat_targets(source)
             if targets is None:
                 return
-        targets = [index for index in targets if 0 <= index < len(tracks) and index != source]
+        targets = [
+            index for index in targets if 0 <= index < len(tracks) and index != source
+        ]
         if not targets:
             self.statusBar().showMessage("No tracks chosen", 3000)
             return
@@ -2560,7 +2831,9 @@ class MainWindow(QMainWindow):
         self._apply_detected_beats()
         self._apply_onsets()
         noun = "track" if len(targets) == 1 else "tracks"
-        self.statusBar().showMessage(f"Applied downbeats to {len(targets)} {noun}", 4000)
+        self.statusBar().showMessage(
+            f"Applied downbeats to {len(targets)} {noun}", 4000
+        )
 
     def _export_downbeats(self, path: str | None = None) -> None:
         index = self._selected
@@ -2661,8 +2934,7 @@ class MainWindow(QMainWindow):
         if result.status == STATUS_EMPTY:
             return "No beats detected"
         if result.status == STATUS_UNAVAILABLE:
-            detail = getattr(result, "message", "") or "Madmom is not installed"
-            return f"{detail} The rest of SonicLab still works."
+            return getattr(result, "message", "") or "Madmom was not found, so downbeats were not detected."
         if result.status == STATUS_CANCELLED:
             return "Beat analysis cancelled"
         if result.status == STATUS_TIMEOUT:
@@ -2673,7 +2945,11 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         duration = len(audio) / OUTPUT_RATE
         name = os.path.splitext(os.path.basename(path))[0]
-        armed = [index for index in self._armed_at_record if 0 <= index < len(self.project.tracks)]
+        armed = [
+            index
+            for index in self._armed_at_record
+            if 0 <= index < len(self.project.tracks)
+        ]
         placed = False
         for index in armed:
             track = self.project.tracks[index]
@@ -2711,7 +2987,9 @@ class MainWindow(QMainWindow):
 
     def _media_dir(self) -> str:
         if self.current_path:
-            directory = os.path.join(os.path.dirname(os.path.abspath(self.current_path)), "Media")
+            directory = os.path.join(
+                os.path.dirname(os.path.abspath(self.current_path)), "Media"
+            )
         else:
             directory = os.path.join(
                 os.path.expanduser("~"), ".local", "share", "soniclab", "recordings"
@@ -2735,7 +3013,9 @@ class MainWindow(QMainWindow):
     def _choose_input(self) -> None:
         devices, error = input_devices()
         if error or not devices:
-            QMessageBox.warning(self, "No input", error or "No input device is available.")
+            QMessageBox.warning(
+                self, "No input", error or "No input device is available."
+            )
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Input device")

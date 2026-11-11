@@ -106,15 +106,32 @@ def _madmom_python_candidates() -> list[Path]:
     return candidates
 
 
+def _imports_madmom(python: Path) -> bool:
+    try:
+        done = subprocess.run(
+            [str(python), "-c", "import madmom"],
+            capture_output=True,
+            timeout=30,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
+
+
 def default_madmom_python() -> Path | None:
-    """Interpreter that has Madmom installed, if this machine has one.
+    """Interpreter that can import Madmom, if this machine has one.
 
     The application environment is not used. Madmom stays on Python 3.11
-    because its code does not run on NumPy 2. A path that was set but does
-    not exist is skipped so a stale setting cannot hide a working copy.
+    because its code does not run on NumPy 2. A path that was set but cannot
+    import Madmom is skipped so it cannot hide a working copy.
     """
+    cached = getattr(default_madmom_python, "_cached", None)
+    if isinstance(cached, Path) and cached.is_file():
+        return cached
     for candidate in _madmom_python_candidates():
-        if candidate.is_file():
+        if candidate.is_file() and _imports_madmom(candidate):
+            default_madmom_python._cached = candidate
             return candidate
     return None
 
@@ -273,7 +290,8 @@ class BeatAnalysisClient:
         cache_dir: Path | str | None = None,
         timeout: float = 300.0,
     ):
-        self.python = Path(python) if python is not None else default_madmom_python()
+        self._explicit_python = python is not None
+        self.python = Path(python) if python is not None else None
         self.worker_script = Path(worker_script) if worker_script is not None else default_worker_script()
         self.cache_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
         self.timeout = float(timeout)
@@ -346,18 +364,25 @@ class BeatAnalysisClient:
             wav_path.unlink(missing_ok=True)
 
     def _execute(self, audio_path, content_hash, fps, bars, sample_rate, timeout, on_progress, cancel_event) -> BeatAnalysisResult:
-        python_ready = self.python is not None and Path(self.python).is_file()
+        if self._explicit_python:
+            python = self.python if self.python is not None and Path(self.python).is_file() else None
+        else:
+            python = default_madmom_python()
+            self.python = python
+        if not self._explicit_python and not self.worker_script.is_file():
+            self.worker_script = default_worker_script()
+        python_ready = python is not None and Path(python).is_file()
         worker_ready = self.worker_script.is_file()
         if not python_ready or not worker_ready:
             looked = ", ".join(str(path) for path in _madmom_python_candidates())
             if not python_ready:
-                message = f"Madmom is not installed. SonicLab looked for its Python at {looked}."
+                message = "Madmom was not found, so downbeats were not detected."
             else:
                 message = f"Madmom's worker script is missing: {self.worker_script}."
-            _record_madmom(message)
+            _record_madmom(f"{message} Looked at {looked}.")
             return _failure(STATUS_UNAVAILABLE, message, fps, bars)
         command = [
-            str(self.python),
+            str(python),
             str(self.worker_script),
             str(audio_path),
             "--fps",
