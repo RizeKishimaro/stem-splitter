@@ -27,7 +27,7 @@ project files.
 | `python/soniclab_native.py` | no | ctypes wrapper; 9 tests in `python/test_soniclab_native.py` |
 | `soniclab::host_juce` | yes | JUCE scanner/loader/instance adapter (AU on macOS, VST3 opt-in) |
 | `SonicLabBeatAnalyzer` | yes | JUCE plugin (Phase 4): pass-through, mono/stereo, Enabled parameter with saved state, input level meter, analysis FIFO, placeholder marker strip, drag-and-drop audio file analysis (waveform, length, peak). AU on macOS, Standalone everywhere |
-| `SonicLabBeatAnalyzerPluginTests` | yes | 20 headless tests of the real processor, editor, file analysis and beat tracking (CTest `beat_analyzer_plugin`) |
+| `SonicLabBeatAnalyzerPluginTests` | yes | 23 headless tests of the real processor, editor, file analysis and beat tracking (CTest `beat_analyzer_plugin`), plus an opt-in test that runs a real recording through the plugin (`SONICLAB_REAL_AUDIO`, used by `scripts/compare_beats.py --plugin`) |
 | `plugins/shared/juce` + `cmake/SonicLabPlugin.cmake` | yes | what every SonicLab plugin shares: theme, widgets, processor and editor base classes, dropped-file analysis, and `soniclab_add_analysis_plugin()` |
 
 ## CMake options
@@ -123,7 +123,7 @@ The shared code and tests also build on macOS without JUCE:
 
 Verified on Arch Linux (Phase 4): JUCE 8.0.4 configures; the host adapter,
 the plugin's Standalone build and the plugin tests compile with no
-warnings; the 20 plugin tests pass (bit-exact pass-through for mono and
+warnings; the 23 plugin tests pass (bit-exact pass-through for mono and
 stereo, no heap allocation in `processBlock`, metering, state round trip
 and older/newer states, headless editor paint, dropped-file analysis of WAV
 files, unreadable files, cancelling, tempo/beats/downbeats of a dropped
@@ -136,6 +136,17 @@ tempo within 0.2 BPM on 8 (one read double, one 2/3), mean beat F-measure
 0.9 on both. Typical misses: half-bar downbeats, and beats on dense fast
 material. This is a classical tracker, not a neural one; Madmom stays the
 DAW's reference.
+
+The same ten songs through the plugin itself (`scripts/compare_beats.py
+--plugin`: dropped as a file, and played live through `processBlock` on a
+stereo and on a mono bus): file results are identical to the above. Live,
+scored after the first 8 s, beat F-measure is 0.73 and downbeat 0.52;
+mono and stereo give the same result, the audio passed through
+bit-exact, and no allocation or dropped audio occurred on the audio
+thread. The live tempo readout at the end of each song matched Madmom on
+5 of 10: on three songs it read "no tempo" because their last seconds
+fade out, and two are the same half/two-thirds cases as the file.
+Live is weaker than file analysis because it sees 12 s at a time.
 The Standalone app has been opened and used on Arch Linux (Wayland,
 PipeWire). A one-off local VST3 build was also loaded through
 SonicLab's own `JucePluginHost` and `PluginChain`. Scan, load, bit-exact

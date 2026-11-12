@@ -1,7 +1,14 @@
-"""Madmom beat analysis through an isolated Python 3.11 worker.
+"""Beat analysis through an isolated worker process.
 
-The worker is a separate process. This module never imports Madmom and never
-runs inside the audio callback.
+The default worker is madmom-infer (``tools/madmom_infer_worker.py``), which
+runs on the app's Python and NumPy. The older Madmom 0.16 worker remains as
+a fallback when that package is absent, or when ``SONICLAB_MADMOM_LEGACY=1``.
+This module never imports either library and never runs inside the audio
+callback.
+
+The pretrained weights are CC BY-NC-SA 4.0. They are downloaded by the
+worker into a user cache. They are not bundled, and downloading them does
+not make them commercially usable.
 
 Time unit
     ``time_seconds`` is seconds from the start of the analyzed source, not
@@ -19,6 +26,7 @@ Cache
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -106,10 +114,12 @@ def _madmom_python_candidates() -> list[Path]:
     return candidates
 
 
-def _imports_madmom(python: Path) -> bool:
+def _imports_module(python: Path, module: str) -> bool:
+    if module not in {"madmom", "madmom_infer"}:
+        return False
     try:
         done = subprocess.run(
-            [str(python), "-c", "import madmom"],
+            [str(python), "-c", f"import {module}"],
             capture_output=True,
             timeout=30,
             start_new_session=True,
@@ -119,34 +129,99 @@ def _imports_madmom(python: Path) -> bool:
     return done.returncode == 0
 
 
-def default_madmom_python() -> Path | None:
-    """Interpreter that can import Madmom, if this machine has one.
+def _imports_madmom(python: Path) -> bool:
+    return _imports_module(python, "madmom")
 
-    The application environment is not used. Madmom stays on Python 3.11
-    because its code does not run on NumPy 2. A path that was set but cannot
-    import Madmom is skipped so it cannot hide a working copy.
-    """
-    cached = getattr(default_madmom_python, "_cached", None)
-    if isinstance(cached, Path) and cached.is_file():
-        return cached
-    for candidate in _madmom_python_candidates():
-        if candidate.is_file() and _imports_madmom(candidate):
-            default_madmom_python._cached = candidate
+
+def _first_importing(candidates: list[Path], module: str) -> Path | None:
+    for candidate in candidates:
+        if candidate.is_file() and _imports_module(candidate, module):
             return candidate
     return None
+
+
+def _infer_python_candidates() -> list[Path]:
+    """Interpreters that may have madmom-infer. The legacy Madmom venv is not one of them."""
+    repo = Path(__file__).resolve().parents[2]
+    installed = Path.home() / "Library" / "Application Support" / "SonicLab" / "venv" / "bin" / "python"
+    return [
+        repo / ".venv-madmom-infer" / "bin" / "python",
+        Path.cwd() / ".venv-madmom-infer" / "bin" / "python",
+        installed,
+        repo / ".venv" / "bin" / "python",
+        Path.cwd() / ".venv" / "bin" / "python",
+    ]
+
+
+def default_beat_backend() -> tuple[Path, str] | None:
+    """``(python, "infer"|"legacy")`` for the first working beat-analysis interpreter.
+
+    An explicit ``SONICLAB_MADMOM_PYTHON`` wins when that interpreter can
+    import one of the two libraries. ``SONICLAB_MADMOM_LEGACY=1`` skips
+    madmom-infer. A path that was set but cannot import either library is
+    skipped so it cannot hide a working copy.
+    """
+    cached = getattr(default_beat_backend, "_cached", None)
+    if isinstance(cached, tuple) and len(cached) == 2 and Path(cached[0]).is_file():
+        return cached
+    if os.environ.get("SONICLAB_MADMOM_LEGACY") == "1":
+        found = _first_importing(_madmom_python_candidates(), "madmom")
+        if found is not None:
+            default_beat_backend._cached = (found, "legacy")
+            return default_beat_backend._cached
+        return None
+    override = os.environ.get("SONICLAB_MADMOM_PYTHON")
+    if override:
+        path = Path(override)
+        if path.is_file() and _imports_module(path, "madmom_infer"):
+            default_beat_backend._cached = (path, "infer")
+            return default_beat_backend._cached
+        if path.is_file() and _imports_module(path, "madmom"):
+            default_beat_backend._cached = (path, "legacy")
+            return default_beat_backend._cached
+    found = _first_importing(_infer_python_candidates(), "madmom_infer")
+    if found is not None:
+        default_beat_backend._cached = (found, "infer")
+        return default_beat_backend._cached
+    found = _first_importing(_madmom_python_candidates(), "madmom")
+    if found is not None:
+        default_beat_backend._cached = (found, "legacy")
+        return default_beat_backend._cached
+    return None
+
+
+def default_madmom_python() -> Path | None:
+    """Interpreter for beat analysis, preferring madmom-infer."""
+    backend = default_beat_backend()
+    if backend is None:
+        return None
+    return backend[0]
+
+
+def _worker_named(name: str) -> Path:
+    override = os.environ.get("SONICLAB_MADMOM_WORKER")
+    if override and Path(override).is_file() and Path(override).name == name:
+        return Path(override)
+    repo = Path(__file__).resolve().parents[2] / "tools" / name
+    if repo.is_file():
+        return repo
+    cwd = Path.cwd() / "tools" / name
+    if cwd.is_file():
+        return cwd
+    installed = Path.home() / "Library" / "Application Support" / "SonicLab" / name
+    if installed.is_file():
+        return installed
+    return repo
 
 
 def default_worker_script() -> Path:
     override = os.environ.get("SONICLAB_MADMOM_WORKER")
     if override and Path(override).is_file():
         return Path(override)
-    repo = Path(__file__).resolve().parents[2] / "tools" / "madmom_worker.py"
-    if repo.is_file():
-        return repo
-    cwd = Path.cwd() / "tools" / "madmom_worker.py"
-    if cwd.is_file():
-        return cwd
-    return Path.home() / "Library" / "Application Support" / "SonicLab" / "madmom_worker.py"
+    backend = default_beat_backend()
+    if backend is not None and backend[1] == "infer":
+        return _worker_named("madmom_infer_worker.py")
+    return _worker_named("madmom_worker.py")
 
 
 def _record_madmom(message: str) -> None:
@@ -295,6 +370,11 @@ class BeatAnalysisClient:
         self.worker_script = Path(worker_script) if worker_script is not None else default_worker_script()
         self.cache_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
         self.timeout = float(timeout)
+        self._session = None
+        self._session_lock = threading.Lock()
+        self._session_stderr: list[bytes] = []
+        self._progress = None
+        atexit.register(self._drop_session)
 
     def analyze(self, source, sample_rate: int | None = None, *, path=None, **kwargs) -> BeatAnalysisResult:
         """Analyze a file path or an in-memory array.
@@ -367,20 +447,43 @@ class BeatAnalysisClient:
         if self._explicit_python:
             python = self.python if self.python is not None and Path(self.python).is_file() else None
         else:
-            python = default_madmom_python()
+            backend = default_beat_backend()
+            python = backend[0] if backend is not None else None
             self.python = python
+            if (
+                backend is not None
+                and backend[1] == "infer"
+                and not os.environ.get("SONICLAB_MADMOM_WORKER")
+            ):
+                script = _worker_named("madmom_infer_worker.py")
+                if script.is_file():
+                    self.worker_script = script
         if not self._explicit_python and not self.worker_script.is_file():
             self.worker_script = default_worker_script()
         python_ready = python is not None and Path(python).is_file()
         worker_ready = self.worker_script.is_file()
         if not python_ready or not worker_ready:
-            looked = ", ".join(str(path) for path in _madmom_python_candidates())
+            looked = ", ".join(
+                str(path) for path in _infer_python_candidates() + _madmom_python_candidates()
+            )
             if not python_ready:
                 message = "Madmom was not found, so downbeats were not detected."
             else:
                 message = f"Madmom's worker script is missing: {self.worker_script}."
             _record_madmom(f"{message} Looked at {looked}.")
             return _failure(STATUS_UNAVAILABLE, message, fps, bars)
+        if self.worker_script.name == "madmom_infer_worker.py":
+            return self._execute_session(
+                python,
+                audio_path,
+                content_hash,
+                fps,
+                bars,
+                sample_rate,
+                timeout,
+                on_progress,
+                cancel_event,
+            )
         command = [
             str(python),
             str(self.worker_script),
@@ -420,6 +523,127 @@ class BeatAnalysisClient:
         if result.status in _CACHEABLE:
             self._write_cache(content_hash, fps, bars, document)
         return result
+
+    def _emit_progress(self, stage: str) -> None:
+        callback = self._progress
+        if callback is None:
+            return
+        try:
+            callback(stage)
+        except Exception:
+            return
+
+    def _drop_session(self) -> None:
+        process = self._session
+        self._session = None
+        if process is None or process.poll() is not None:
+            return
+        _kill(process)
+
+    def _ensure_session(self, python: Path) -> subprocess.Popen:
+        process = self._session
+        if process is not None and process.poll() is None:
+            return process
+        self._session_stderr = []
+        process = subprocess.Popen(
+            [str(python), str(self.worker_script), "--serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self._session = process
+        threading.Thread(
+            target=_drain,
+            args=(process.stderr, self._session_stderr, _STDERR_LIMIT, self._emit_progress),
+            daemon=True,
+        ).start()
+        return process
+
+    def _execute_session(
+        self,
+        python: Path,
+        audio_path,
+        content_hash,
+        fps,
+        bars,
+        sample_rate,
+        timeout,
+        on_progress,
+        cancel_event,
+    ) -> BeatAnalysisResult:
+        """Reuse one madmom-infer process so the networks stay loaded."""
+        limit = self.timeout if timeout is None else timeout
+        with self._session_lock:
+            try:
+                process = self._ensure_session(python)
+            except OSError as exc:
+                return _failure(STATUS_UNAVAILABLE, str(exc), fps, bars)
+            self._progress = on_progress
+            request = json.dumps(
+                {"audio": str(audio_path), "fps": int(fps), "bars": list(bars)}
+            ) + "\n"
+            holder: list = []
+
+            def read_line() -> None:
+                try:
+                    holder.append(process.stdout.readline() if process.stdout is not None else b"")
+                except Exception as exc:
+                    holder.append(exc)
+
+            reader = threading.Thread(target=read_line, daemon=True)
+            reader.start()
+            try:
+                if process.stdin is None:
+                    raise OSError("beat analysis worker has no input")
+                process.stdin.write(request.encode())
+                process.stdin.flush()
+            except OSError as exc:
+                self._progress = None
+                self._drop_session()
+                return _failure(STATUS_UNAVAILABLE, str(exc), fps, bars)
+            deadline = time.monotonic() + max(0.0, float(limit))
+            stop = None
+            while reader.is_alive():
+                if _cancelled(cancel_event):
+                    stop = STATUS_CANCELLED
+                    break
+                if time.monotonic() >= deadline:
+                    stop = STATUS_TIMEOUT
+                    break
+                reader.join(0.02)
+            self._progress = None
+            if stop is not None:
+                self._drop_session()
+                return _failure(stop, _stop_message(stop), fps, bars)
+            if not holder or isinstance(holder[0], Exception) or not holder[0]:
+                detail = (
+                    str(holder[0])
+                    if holder and isinstance(holder[0], Exception)
+                    else "beat analysis worker closed"
+                )
+                self._drop_session()
+                return _failure(STATUS_ERROR, detail, fps, bars)
+            stdout = holder[0].decode("utf-8", errors="replace")
+            stderr = b"".join(self._session_stderr).decode("utf-8", errors="replace")
+            try:
+                document = parse_worker_document(_extract_json(stdout), fps=fps, beats_per_bar=bars)
+            except (BeatAnalysisError, json.JSONDecodeError, ValueError) as exc:
+                return _failure(STATUS_ERROR, str(exc), fps, bars, stderr=stderr)
+            if document.get("status") == STATUS_ERROR:
+                return _failure(
+                    STATUS_ERROR,
+                    document.get("message") or "beat analysis failed",
+                    fps,
+                    bars,
+                    stderr=stderr,
+                )
+            if sample_rate is not None and document.get("sample_rate") is None:
+                document["sample_rate"] = int(sample_rate)
+            result = result_from_document(document, stderr=stderr, sample_rate=sample_rate)
+            if result.status in _CACHEABLE:
+                self._write_cache(content_hash, fps, bars, document)
+            return result
 
     def _read_cache(self, content_hash, fps, bars, sample_rate) -> BeatAnalysisResult | None:
         path = self._cache_path(content_hash, fps, bars)

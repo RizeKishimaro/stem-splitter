@@ -1,10 +1,12 @@
 import bisect
+import logging
+import sys
 import math
 
 import numpy as np
 from shiboken6 import isValid
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPen, QPainter, QPolygonF
 
 from soniclab.core.audio_engine import OUTPUT_RATE
@@ -33,6 +35,20 @@ from PySide6.QtWidgets import (
 # Musical time starts at x = 0. Track controls live in a widget column beside
 # the view, so the scene no longer reserves a header gutter.
 TRACK_HEIGHT = 76
+# Held while dragging to take one bar out of a track. Qt reports the Mac's
+# Command key as Control.
+BAR_DRAG_KEY = "⌘" if sys.platform == "darwin" else "Ctrl"
+
+
+DRAG_LOG = logging.getLogger("soniclab.drag")
+
+
+def track_canvas(track) -> int:
+    """Which canvas a track is on: 0 is the main one, 1 the second."""
+    try:
+        return int(track.get("canvas", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 HEADER_WIDTH = 0
 PIXELS_PER_SECOND = 90.0
 RULER_HEIGHT = 32
@@ -152,6 +168,8 @@ class ClipItem(QGraphicsRectItem):
         self._grid_snap = bool(grid_snap)
         self.trim_callback = trim_callback
         self.release_callback = release_callback
+        self.downbeat_callback = None
+        self.rename_callback = None
         self._fade_in = float(fade_in)
         self._fade_out = float(fade_out)
         self._edge = None
@@ -171,7 +189,9 @@ class ClipItem(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
 
         self.setZValue(3)
-        self.setToolTip(f"{name} · {duration:.2f}s")
+        self.setToolTip(
+            f"{name} · {duration:.2f}s · drag to place · double-click the name to rename"
+        )
 
         footer = 14.0 if self._clip_height >= 36 else 0.0
         top = 4.0
@@ -197,6 +217,35 @@ class ClipItem(QGraphicsRectItem):
         self._show_detected = False
         self._onsets: tuple[tuple[float, str], ...] = ()
         self._show_onsets = False
+        self._bar_cuts: tuple[float, ...] = ()
+        # (bar, local_x0, local_x1, local_t0, local_t1) for each painted block.
+        self._block_spans: tuple[tuple, ...] = ()
+        self._block_press = None
+        self._block_dragging = False
+        self._hidden_span = None
+        self.block_drag_callback = None
+        self.block_drop_callback = None
+        # Called on release with (clip, scene position, scene position of the
+        # press); returns True when it took the drop (the other canvas).
+        self.canvas_drop_callback = None
+        self._press_scene = None
+        self._press_play = None
+        self._press_downbeat = None
+        # While the clip is dragged it may change rows: ``row_snap(clip, y)``
+        # returns the y of the row under the clip, and ``row_drop(clip)`` on
+        # release returns True when it moved the clip to another row.
+        self.row_snap = None
+        self.row_drop = None
+        self._row_drag = False
+        # Bars picked with the selection box (bar numbers, span[0]). A plain
+        # drag on a picked bar moves every picked bar (``group_drag`` /
+        # ``group_drop``); ``drag_move`` reports whole-clip drags so the other
+        # canvas can show where they would land.
+        self.picked: set[int] = set()
+        self.group_drag = None
+        self.group_drop = None
+        self.drag_move = None
+        self._group = False
         self._duration = float(duration)
         self._draw_title(name)
 
@@ -267,6 +316,8 @@ class ClipItem(QGraphicsRectItem):
         title.setFont(QFont("DejaVu Sans", 8))
         title.setPos(8, max(2.0, self._clip_height - self._footer))
         title.setZValue(6)
+        title.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        title.setToolTip("Double-click the name to rename")
         self._title = title
 
     def paint(self, painter, option, widget=None):
@@ -296,7 +347,67 @@ class ClipItem(QGraphicsRectItem):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#D7B36A"), 1))
             painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
+        self._paint_block_gaps(painter)
+        if self.picked:
+            for span in self._block_spans:
+                if span[0] in self.picked:
+                    block = QRectF(float(span[1]) + 1, 1, max(0.0, float(span[2]) - float(span[1]) - 2), self.rect().height() - 2)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(215, 179, 106, 46))
+                    painter.drawRect(block)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.setPen(QPen(QColor("#D7B36A"), 1.5))
+                    painter.drawRect(block)
+        if self._hidden_span is not None:
+            left, right = self._hidden_span
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#0C0D10"))
+            painter.drawRect(QRectF(left, 0, max(0.0, right - left), self.rect().height()))
         painter.restore()
+
+    def set_bar_cuts(self, cuts) -> None:
+        """Clip-local x positions where this track splits into bar blocks."""
+        self._bar_cuts = tuple(float(x) for x in cuts)
+        self.update()
+
+    def set_block_spans(self, cuts, spans) -> None:
+        """Remember each bar block.
+
+        A plain drag moves the whole track, bar blocks and all. With more
+        than one block, Ctrl-drag (⌘-drag on macOS) takes one bar out of it.
+        """
+        self.set_bar_cuts(cuts)
+        self._block_spans = tuple(spans)
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        if len(self._block_spans) > 1:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setToolTip(
+                f"{self.name} · drag to move the track · {BAR_DRAG_KEY}-drag to move one bar"
+                " · double-click the name to rename"
+            )
+
+    def _span_at(self, x: float):
+        for span in self._block_spans:
+            if span[1] - 1 <= x <= span[2] + 1:
+                return span
+        return None
+
+    def _paint_block_gaps(self, painter) -> None:
+        if not self._bar_cuts:
+            return
+        height = self.rect().height()
+        width = self.rect().width()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#0C0D10"))
+        for x in self._bar_cuts:
+            painter.drawRect(QRectF(x - 3, 0, 6, height))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(CLIP_EDGE, 1))
+        edges = (0.0, *self._bar_cuts, width)
+        for left, right in zip(edges, edges[1:]):
+            if right - left < 4:
+                continue
+            painter.drawRect(QRectF(left + 1, 1, right - left - 5, height - 2))
 
     def _paint_wave(self, painter, left: float, right: float):
         image = self._ensure_raster()
@@ -432,24 +543,127 @@ class ClipItem(QGraphicsRectItem):
         return None
 
     def hoverMoveEvent(self, event):
-        self.setCursor(
-            Qt.CursorShape.SizeHorCursor if self._edge_at(event.pos().x()) else Qt.CursorShape.ArrowCursor
-        )
+        if self._edge_at(event.pos().x()):
+            cursor = Qt.CursorShape.SizeHorCursor
+        elif len(self._block_spans) > 1:
+            cursor = Qt.CursorShape.OpenHandCursor
+        else:
+            cursor = Qt.CursorShape.ArrowCursor
+        self.setCursor(cursor)
         super().hoverMoveEvent(event)
 
+    def _downbeat_hit(self, x: float) -> float | None:
+        best = None
+        best_distance = 7.0
+        for local, downbeat in self.detected_markers():
+            if not downbeat:
+                continue
+            distance = abs(local * self.pixels_per_second - x)
+            if distance <= best_distance:
+                best = float(local)
+                best_distance = distance
+        return best
+
+    def _play_button_at(self, pos: QPointF):
+        for child in self.childItems():
+            if isinstance(child, BarPlayButton) and child.isVisible():
+                if child.mapRectToParent(child.rect()).contains(pos):
+                    return child
+        return None
+
     def mousePressEvent(self, event):
-        edge = self._edge_at(event.pos().x()) if event.button() == Qt.MouseButton.LeftButton else None
+        self._press_scene = QPointF(event.scenePos())
+        self._press_play = (
+            self._play_button_at(event.pos()) if event.button() == Qt.MouseButton.LeftButton else None
+        )
+        # The downbeat marker is the top of the clip. The trim handles stay
+        # on the lower part of the same edge. A click on a marker opens its
+        # menu on release; pressing it and moving drags the clip, since the
+        # marker sits on the corner people grab a bar by.
+        self._press_downbeat = None
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and event.pos().y() <= 16
+            and self.downbeat_callback is not None
+        ):
+            local = self._downbeat_hit(event.pos().x())
+            if local is not None:
+                self._press_downbeat = (local, event.screenPos())
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.picked
+            and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+            and self._edge_at(event.pos().x()) is None
+            and self.group_drag is not None
+        ):
+            span = self._span_at(event.pos().x())
+            if span is not None and span[0] in self.picked:
+                # A picked bar: drag every picked bar together.
+                self._block_press = (span, QPointF(event.scenePos()))
+                self._block_dragging = False
+                self._group = True
+                event.accept()
+                return
+        if event.button() == Qt.MouseButton.LeftButton and self.group_drag is not None:
+            # Pressing anywhere else ends the bar selection.
+            self.group_drag(None, None, None, None)
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and len(self._block_spans) > 1
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and self._edge_at(event.pos().x()) is None
+        ):
+            span = self._span_at(event.pos().x())
+            if span is not None:
+                if self.scene() is not None:
+                    self.scene().clearSelection()
+                self.setSelected(True)
+                self._block_press = (span, QPointF(event.scenePos()))
+                self._block_dragging = False
+                event.accept()
+                return
+        edge = (
+            self._edge_at(event.pos().x())
+            if event.button() == Qt.MouseButton.LeftButton and self._press_downbeat is None
+            else None
+        )
         if edge:
             self._edge = edge
             self._report_moves = False
             self._trim_right = float(self.pos().x() + self.rect().width())
             event.accept()
             return
+        self._row_drag = event.button() == Qt.MouseButton.LeftButton
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        footer = max(self._footer, 14.0)
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and event.pos().y() >= self._clip_height - footer
+            and self.rename_callback is not None
+        ):
+            self.rename_callback(self.clip_index)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event):
+        if self._block_press is not None:
+            span, origin = self._block_press
+            moved = (event.scenePos() - origin).manhattanLength() >= 4 or self._block_dragging
+            if moved:
+                self._block_dragging = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                callback = self.group_drag if self._group else self.block_drag_callback
+                if callback:
+                    callback(self, span, QPointF(event.scenePos()), origin)
+            event.accept()
+            return
         if not self._edge:
             super().mouseMoveEvent(event)
+            if self.drag_move is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                self.drag_move(self, QPointF(event.scenePos()))
             return
         minimum = 8.0 if not self._grid_snap else max(8.0, self.snap_pixels)
         if self._edge == "right":
@@ -464,6 +678,42 @@ class ClipItem(QGraphicsRectItem):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        button, self._press_play = getattr(self, "_press_play", None), None
+        marker, self._press_downbeat = getattr(self, "_press_downbeat", None), None
+        press = getattr(self, "_press_scene", None)
+        clicked = press is not None and (QPointF(event.scenePos()) - press).manhattanLength() < 4
+        if marker is not None and clicked and self.downbeat_callback is not None:
+            # A click on a downbeat marker, not a drag: open its menu.
+            super().mouseReleaseEvent(event)
+            self._press_scene = None
+            self.downbeat_callback(self, marker[0], marker[1])
+            return
+        if (
+            button is not None
+            and press is not None
+            and (QPointF(event.scenePos()) - press).manhattanLength() < 4
+        ):
+            # A click on the bar's play button, not a drag.
+            self._block_press = None
+            self._block_dragging = False
+            self._press_scene = None
+            event.accept()
+            if isValid(button):
+                button.play()
+            return
+        if self._block_press is not None:
+            span, origin = self._block_press
+            dragging = self._block_dragging
+            group, self._group = self._group, False
+            self._block_press = None
+            self._block_dragging = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            scene_pos = QPointF(event.scenePos())
+            callback = self.group_drop if group else self.block_drop_callback
+            if dragging and callback:
+                callback(self, span, scene_pos, origin)
+            event.accept()
+            return
         edge = self._edge
         self._edge = None
         super().mouseReleaseEvent(event)
@@ -474,6 +724,28 @@ class ClipItem(QGraphicsRectItem):
                 duration = max(0.01, float(self.rect().width()) / self.pixels_per_second)
                 self.trim_callback(self.clip_index, start, duration)
             return
+        press, self._press_scene = self._press_scene, None
+        row_drag, self._row_drag = self._row_drag, False
+        if self.drag_move is not None:
+            self.drag_move(self, None)  # the drag is over: clear any preview
+        DRAG_LOG.info(
+            "release clip %s: press %s scene %s row_drag %s modifiers %s",
+            self.clip_index,
+            None if press is None else (round(press.x()), round(press.y())),
+            (round(event.scenePos().x()), round(event.scenePos().y())),
+            row_drag,
+            int(event.modifiers().value),
+        )
+        if (
+            press is not None
+            and self.canvas_drop_callback is not None
+            and self.canvas_drop_callback(self, QPointF(event.scenePos()), press)
+        ):
+            return
+        if row_drag and self.row_drop is not None and self.row_drop(self):
+            return
+        if self._y_locked and abs(float(self.pos().y()) - self._locked_y) > 0.5:
+            self.setPos(self.pos().x(), self._locked_y)  # same row after all
         if self.release_callback:
             self.release_callback(self.clip_index)
 
@@ -495,10 +767,12 @@ class ClipItem(QGraphicsRectItem):
         if change == QGraphicsRectItem.GraphicsItemChange.ItemPositionChange:
             x = self._arrangement_x(value.x())
             y = self._locked_y if self._y_locked else float(value.y())
+            if self._row_drag and self._y_locked and self.row_snap is not None:
+                y = self.row_snap(self, float(value.y()))
             return type(value)(x, y)
 
         if change == QGraphicsRectItem.GraphicsItemChange.ItemPositionHasChanged:
-            if not self._y_locked:
+            if not self._y_locked and not self._row_drag:
                 self._locked_y = float(self.pos().y())
                 self._y_locked = True
             seconds = max(
@@ -511,6 +785,41 @@ class ClipItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
+class BarPlayButton(QGraphicsRectItem):
+    """Play one bar. Sits in the middle of that bar's block."""
+
+    def __init__(self, view: "TimelineView", index: int):
+        super().__init__(0, 0, 16, 16)
+        self._view = view
+        self._index = index
+        self.setZValue(15)
+        self.setBrush(QBrush(QColor("#1A201C")))
+        self.setPen(QPen(QColor("#C6A56A"), 1))
+        self.setToolTip(f"Play bar {index + 1}")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(self.pen())
+        painter.setBrush(self.brush())
+        painter.drawRoundedRect(self.rect(), 2, 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#E7F2EA")))
+        painter.drawPolygon(
+            QPolygonF([QPointF(5, 4), QPointF(5, 12), QPointF(12, 8)])
+        )
+
+    def play(self) -> None:
+        self._view.bar_play_requested.emit(self._index)
+
+    def mousePressEvent(self, event):
+        # Let the clip underneath take the press: a click still plays the bar
+        # (see ClipItem.mouseReleaseEvent), but pressing here and moving drags
+        # the clip, which on a short bar is mostly covered by this button.
+        event.ignore()
+
+
 class TimelineView(QGraphicsView):
     seek_requested = Signal(float)
     track_selected = Signal(int)
@@ -521,9 +830,36 @@ class TimelineView(QGraphicsView):
     bar_edit_requested = Signal(int)
     # Zero-based first and last bar of a Shift-click range on the ruler.
     bars_selected = Signal(int, int)
+    # Zero-based bar whose play button was pressed.
+    bar_play_requested = Signal(int)
+    # Zero-based bar and a global position, from a click on a downbeat marker.
+    downbeat_clicked = Signal(int, QPoint)
+    # Track whose name was double-clicked on the clip.
+    rename_requested = Signal(int)
+    # Track index, canvas, new start: a whole clip dropped on the other canvas.
+    canvas_move_requested = Signal(int, int, float)
+    # Clips dropped on the other canvas: their indices (the selection), the
+    # one that was grabbed, how far in time they moved, and the other
+    # canvas's display row under the pointer.
+    canvas_drop_requested = Signal(list, int, float, int)
+    # Picked bars dragged and dropped: [(track index, local start, local
+    # duration, bar)], the position in that list of the grabbed one, how far
+    # in time they moved, the canvas they were dropped on, and its display
+    # row under the pointer.
+    blocks_move_requested = Signal(list, int, float, int, int)
+    # Track index and display row: a whole clip dropped on another row of
+    # this canvas (a row past the last one means a new row).
+    row_move_requested = Signal(int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, canvas: int = 0):
         super().__init__(parent)
+        # Which canvas this view shows: tracks whose ``canvas`` field is this
+        # number (0, the default, is the main canvas). ``peer`` is the view
+        # of the other canvas, if there is one; clips and bar blocks dropped
+        # on it move there.
+        self.canvas = int(canvas)
+        self.peer: "TimelineView | None" = None
+        self.empty_text = ""
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
         self.setBackgroundBrush(QColor("#0C0D10"))
@@ -549,6 +885,7 @@ class TimelineView(QGraphicsView):
         self.show_onsets = True
         self.on_trim = None
         self.on_release = None
+        self.on_block_move = None
         self._row_heights: list[int] = []
         self._args = None
         self._rebuilding = False
@@ -564,6 +901,15 @@ class TimelineView(QGraphicsView):
         self._bar_drag: tuple[int, QGraphicsLineItem] | None = None
         self._bar_press_x = 0.0
         self._bar_anchor = 0
+        self._canvas_pan = None
+        self._canvas_panned = False
+        self._empty_press = None
+        self._band = None  # (scene origin, rect item, add to picks) while drawing a bar-selection box
+        self._picks: dict[int, set[int]] = {}
+        self._group_drag = None
+        self._ghosts: list = []  # outlines of dragged items shown on this canvas
+        self._block_ghost = None
+        self._block_drag = None
         self.scene_obj.selectionChanged.connect(self._on_selection)
 
     @property
@@ -637,6 +983,8 @@ class TimelineView(QGraphicsView):
         self._loop_region_item = None
         self._bar_handles = []
         self._bar_drag = None
+        self._block_ghost = None
+        self._block_drag = None
         self._retained.clear()
         self.scene_obj.clear()
 
@@ -668,6 +1016,35 @@ class TimelineView(QGraphicsView):
             top += self.row_height(row)
         return top
 
+    def lane_rows(self, tracks) -> tuple[list[int], list[int]]:
+        """Display row of each track, and the first track index of each row.
+
+        Tracks that share a ``lane`` stay on one row. A track without one
+        keeps its own row. A track on another canvas has row -1 here.
+        """
+        rows: list[int] = []
+        primaries: list[int] = []
+        seen: dict = {}
+        for index, track in enumerate(tracks):
+            if track_canvas(track) != self.canvas:
+                rows.append(-1)
+                continue
+            lane = track.get("lane")
+            key = ("shared", lane) if lane is not None else ("solo", index)
+            row = seen.get(key)
+            if row is None:
+                row = len(primaries)
+                seen[key] = row
+                primaries.append(index)
+            rows.append(row)
+        return rows, primaries
+
+    def _display_top(self, display_row: int, primaries: list[int]) -> float:
+        top = float(RULER_HEIGHT)
+        for row in range(min(display_row, len(primaries))):
+            top += self.row_height(primaries[row])
+        return top
+
     def rebuild(self, tracks, on_move, bpm=120.0, time_signature="4/4", bars=None):
         # Release Python-owned items before the scene destroys their C++ objects.
         self._rebuilding = True
@@ -681,7 +1058,8 @@ class TimelineView(QGraphicsView):
             [t.get("duration", 10) + t.get("start", 0) for t in tracks] + [30]
         )
         width = HEADER_WIDTH + max_duration * pps + 500
-        content_bottom = self._row_top(len(tracks))
+        display_rows, primaries = self.lane_rows(tracks)
+        content_bottom = self._display_top(len(primaries), primaries)
         viewport_height = self.viewport().height() if self.viewport() is not None else 0
         height = max(500, content_bottom + TRACK_HEIGHT, viewport_height)
         self.scene_obj.setSceneRect(0, 0, width, height)
@@ -725,6 +1103,19 @@ class TimelineView(QGraphicsView):
         self._bar_lines = lines
         self._bar_fallback = bar_duration
         marks = beat_lines(lines, beats_per_bar)
+        if lines and lines[0] > 1e-6:
+            # Bar 1 is the first detected downbeat, often seconds into the
+            # song. The intro before it gets beats too (counting back at the
+            # first bar's pace) and the song's start, so clips can be drawn on
+            # a grid there and dragged all the way back to 0 s.
+            first_bar = (lines[1] - lines[0]) if len(lines) > 1 else bar_duration
+            beat = max(0.01, first_bar / max(1, beats_per_bar))
+            pickup = []
+            time = lines[0] - beat
+            while time > 1e-6:
+                pickup.append((round(time, 6), False))
+                time -= beat
+            marks = [(0.0, False)] + pickup[::-1] + marks
         self._snap_points = [HEADER_WIDTH + time * pps for time, _bar in marks]
         mapped = len(self._bar_map)
         bar_pen = QPen(QColor("#343C48"), 1)
@@ -743,6 +1134,7 @@ class TimelineView(QGraphicsView):
                 # Lines the caller placed are gold; repeats past the map are dim.
                 label.setDefaultTextColor(QColor("#C6A56A" if not mapped or number <= mapped else "#7D6C4C"))
                 label.setPos(x + 6, 6)
+                label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             else:
                 spacing = x - previous if previous is not None else 0.0
                 if spacing >= 6:
@@ -758,10 +1150,10 @@ class TimelineView(QGraphicsView):
                 x = HEADER_WIDTH + time * pps
                 self._bar_handles.append(self._keep(self.scene_obj.addLine(x, 0, x, RULER_HEIGHT, handle_pen)))
 
-        for row, track in enumerate(tracks):
-            row_h = self.row_height(row)
-            y = self._row_top(row)
-            lane = QColor("#12161B") if row % 2 == 0 else QColor("#161B22")
+        for display, primary in enumerate(primaries):
+            row_h = self.row_height(primary)
+            y = self._display_top(display, primaries)
+            lane = QColor("#12161B") if display % 2 == 0 else QColor("#161B22")
             self._keep(
                 self.scene_obj.addRect(
                     0,
@@ -782,6 +1174,18 @@ class TimelineView(QGraphicsView):
                 )
             )
 
+        if not primaries and self.empty_text:
+            hint = self._keep(self.scene_obj.addText(self.empty_text))
+            hint.setDefaultTextColor(QColor("#8B939F"))
+            hint.setPos(HEADER_WIDTH + 16, RULER_HEIGHT + 14)
+            hint.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+        for row, track in enumerate(tracks):
+            display = display_rows[row]
+            if display < 0:
+                continue  # on the other canvas
+            row_h = self.row_height(primaries[display])
+            y = self._display_top(display, primaries)
             audio = track.get("_audio")
             if audio is None or len(audio) == 0:
                 continue
@@ -820,16 +1224,507 @@ class TimelineView(QGraphicsView):
             clip._snap_enabled = True
             clip.snap_points = self._snap_points
             clip._report_moves = True
+            clip.downbeat_callback = self._downbeat_pressed
+            clip.rename_callback = self.rename_requested.emit
+            clip.block_drag_callback = self._drag_block
+            clip.block_drop_callback = self._drop_block
+            clip.canvas_drop_callback = self._drop_clip_on_peer
+            clip.row_snap = self._snap_to_row
+            clip.row_drop = self._drop_clip_on_row
+            clip.group_drag = self._drag_group
+            clip.group_drop = self._drop_group
+            clip.drag_move = self._preview_on_peer
+            if track.get("bar_block"):
+                # A placed bar can land on top of other audio on its row. It
+                # is drawn, and grabbed, above it.
+                clip.setZValue(4)
             beats, tempo = self._beat_track(track, audio)
             clip.set_beats(beats, offset_seconds, beats_per_bar, self.show_beats)
             if tempo > 0:
                 clip.setToolTip(f"{clip.toolTip()} · {tempo:.1f} BPM detected")
+            self._place_bar_blocks(
+                clip,
+                float(track.get("start", 0.0) or 0.0),
+                float(duration),
+                whole=bool(track.get("bar_block")),
+            )
 
+        self._apply_picks()
         self._paint_loop_region()
         self.horizontalScrollBar().setValue(scroll_x)
         self.verticalScrollBar().setValue(scroll_y)
         self._rebuilding = False
         self.layout_changed.emit()
+
+    def _place_bar_blocks(self, clip: ClipItem, start: float, duration: float, whole: bool = False) -> None:
+        """Split one track into a block per bar and center a play button in each.
+
+        ``whole`` keeps the clip as one block: a bar that was dragged out of
+        its track is a single piece even where it no longer lines up with the
+        bar lines, so it can be dragged again as a whole.
+        """
+        if not self._bar_lines or duration <= 0:
+            return
+        pps = self.pixels_per_second
+        width = float(clip.rect().width())
+        end = start + duration
+        if whole:
+            bar = bar_index(self._bar_lines, start + duration / 2, self._bar_fallback)
+            clip.set_block_spans([], [(max(0, bar), 0.0, width, 0.0, duration)])
+            if width >= 22:
+                button = BarPlayButton(self, max(0, bar))
+                button.setParentItem(clip)
+                button.setPos(width / 2 - 8.0, (clip._clip_height - 16.0) / 2)
+                self._keep(button)
+            return
+        first = bar_index(self._bar_lines, start, self._bar_fallback)
+        index = 0 if first < 0 else first
+        cuts: list[float] = []
+        spans: list[tuple] = []
+        for _step in range(4000):
+            left_t, right_t = bar_span(self._bar_lines, index, self._bar_fallback)
+            if left_t >= end - 1e-4:
+                break
+            if right_t > start + 1e-4:
+                local_left = max(0.0, (left_t - start) * pps)
+                local_right = min(width, (right_t - start) * pps)
+                if local_right - local_left >= 2:
+                    if local_left > 1:
+                        cuts.append(local_left)
+                    local_t0 = max(0.0, left_t - start)
+                    local_t1 = min(duration, right_t - start)
+                    spans.append((index, local_left, local_right, local_t0, local_t1))
+            index += 1
+        clip.set_block_spans(cuts, spans)
+        size = 16.0
+        for bar, left, right, _t0, _t1 in spans:
+            inset_left = left + (3 if left > 1 else 0)
+            inset_right = right - 3
+            if inset_right - inset_left < 22:
+                continue
+            button = BarPlayButton(self, bar)
+            button.setParentItem(clip)
+            button.setPos(
+                (inset_left + inset_right) / 2 - size / 2,
+                (clip._clip_height - size) / 2,
+            )
+            self._keep(button)
+
+    def _drag_block(self, clip: ClipItem, span, scene_pos: QPointF, origin: QPointF) -> None:
+        """Slide one bar block across the canvas. The rest of the clip stays."""
+        if self._block_drag is None:
+            left = float(clip.pos().x()) + float(span[1])
+            tracks = self._args[0] if self._args else []
+            rows, primaries = self.lane_rows(tracks)
+            source_row = rows[clip.clip_index] if clip.clip_index < len(rows) else 0
+            source_top = self._display_top(source_row, primaries) if primaries else float(RULER_HEIGHT)
+            hidden = []
+            for child in clip.childItems():
+                if isinstance(child, BarPlayButton) and span[1] <= child.pos().x() + 8 <= span[2]:
+                    child.setVisible(False)
+                    hidden.append(child)
+            clip._hidden_span = (float(span[1]), float(span[2]))
+            clip.update()
+            ghost = QGraphicsRectItem(0, 0, max(8.0, float(span[2] - span[1])), clip.rect().height())
+            ghost.setBrush(QBrush(clip.brush()))
+            ghost.setPen(QPen(clip._accent, 1))
+            ghost.setZValue(12)
+            ghost.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.scene_obj.addItem(self._keep(ghost))
+            self._block_ghost = ghost
+            self._block_drag = {
+                "clip": clip,
+                "span": span,
+                "grab": float(origin.x()) - left,
+                "inset": float(clip.pos().y()) - source_top,
+                "source_row": source_row,
+                "hidden": hidden,
+                "moved": False,
+            }
+        drag = self._block_drag
+        drag["moved"] = True
+        width = float(span[2] - span[1])
+        ghost = self._block_ghost
+        peer_pos = self._peer_scene_pos(scene_pos)
+        if self.peer is not None:
+            self.peer.show_drop_ghost(
+                None if peer_pos is None else QPointF(peer_pos.x() - drag["grab"], peer_pos.y()),
+                width,
+                clip.rect().height(),
+                clip,
+            )
+        if ghost is not None and isValid(ghost):
+            ghost.setVisible(peer_pos is None)
+        if peer_pos is not None:
+            return
+        left = clip._arrangement_x(float(scene_pos.x()) - drag["grab"])
+        row, _primary = self._row_under(float(scene_pos.y()))
+        top = self._row_top_of(row)
+        if ghost is not None and isValid(ghost):
+            ghost.setPos(left, top + drag["inset"])
+            ghost.setRect(0, 0, width, clip.rect().height())
+
+    def _row_under(self, scene_y: float) -> tuple[int, int]:
+        tracks = self._args[0] if self._args else []
+        _rows, primaries = self.lane_rows(tracks)
+        if not primaries:
+            return 0, 0
+        best = 0
+        best_distance = 1e9
+        for display, primary in enumerate(primaries):
+            top = self._display_top(display, primaries)
+            height = self.row_height(primary)
+            if top <= scene_y < top + height:
+                return display, primary
+            distance = abs(scene_y - (top + height / 2))
+            if distance < best_distance:
+                best = display
+                best_distance = distance
+        below = self._display_top(len(primaries), primaries)
+        if scene_y >= below - 8:
+            return len(primaries), -1
+        return best, primaries[best]
+
+    def _row_top_of(self, display_row: int) -> float:
+        tracks = self._args[0] if self._args else []
+        _rows, primaries = self.lane_rows(tracks)
+        if display_row >= len(primaries):
+            return self._display_top(len(primaries), primaries)
+        return self._display_top(display_row, primaries)
+
+    def _clear_block_drag(self, restore: bool) -> None:
+        drag = self._block_drag
+        ghost = self._block_ghost
+        self._block_drag = None
+        self._block_ghost = None
+        if ghost is not None and isValid(ghost):
+            self.scene_obj.removeItem(ghost)
+            try:
+                self._retained.remove(ghost)
+            except ValueError:
+                pass
+        if not restore or drag is None:
+            return
+        clip = drag["clip"]
+        if isValid(clip):
+            clip._hidden_span = None
+            clip.update()
+        for button in drag["hidden"]:
+            if isValid(button):
+                button.setVisible(True)
+
+    def _drop_block(self, clip: ClipItem, span, scene_pos: QPointF, origin: QPointF) -> None:
+        if self._block_drag is None:
+            self._drag_block(clip, span, scene_pos, origin)
+        drag = self._block_drag
+        ghost = self._block_ghost
+        peer_pos = self._peer_scene_pos(scene_pos)
+        if self.peer is not None:
+            self.peer.show_drop_ghost(None, 0, 0, clip)
+        if drag is not None and drag.get("moved") and peer_pos is not None:
+            # Dropped on the other canvas: a new row there, at the drop time.
+            peer = self.peer
+            left = clip._arrangement_x(float(peer_pos.x()) - drag["grab"])
+            new_start = max(0.0, (left - HEADER_WIDTH) / self.pixels_per_second)
+            tracks = self._args[0] if self._args else []
+            row, primary = peer._row_under(float(peer_pos.y()))
+            _rows, primaries = peer.lane_rows(tracks)
+            join = 0 <= row < len(primaries) and primary >= 0  # onto a row there: join it
+            insert_at = primaries[row] if join else len(tracks)
+            local_start = float(span[3])
+            local_duration = max(0.0, float(span[4]) - local_start)
+            bar = int(span[0])
+            self._clear_block_drag(restore=True)
+            callback = self.on_block_move
+            if callback is not None:
+                payload = (clip.clip_index, local_start, local_duration, new_start, False, insert_at, bar, peer.canvas, join)
+                QTimer.singleShot(0, lambda payload=payload, callback=callback: callback(*payload))
+            return
+        if drag is None or not drag.get("moved") or ghost is None or not isValid(ghost):
+            self._clear_block_drag(restore=True)
+            return
+        left = float(ghost.pos().x())
+        new_start = max(0.0, (left - HEADER_WIDTH) / self.pixels_per_second)
+        row, primary = self._row_under(float(ghost.pos().y()) + float(clip.rect().height()) / 2)
+        share = row == drag["source_row"]
+        tracks = self._args[0] if self._args else []
+        _rows, primaries = self.lane_rows(tracks)
+        join = False
+        if share:
+            insert_at = clip.clip_index + 1
+        elif primary < 0 or row >= len(primaries):
+            insert_at = len(tracks)  # below the last row: a row of its own
+        else:
+            insert_at = primaries[row]
+            join = True  # onto another track's row: it joins that row
+        local_start = float(span[3])
+        local_duration = max(0.0, float(span[4]) - local_start)
+        bar = int(span[0])
+        self._clear_block_drag(restore=True)
+        callback = self.on_block_move
+        if callback is None:
+            return
+        payload = (clip.clip_index, local_start, local_duration, new_start, share, insert_at, bar, None, join)
+        QTimer.singleShot(0, lambda payload=payload, callback=callback: callback(*payload))
+
+    def _peer_scene_pos(self, scene_pos: QPointF) -> QPointF | None:
+        """``scene_pos`` (this view's scene) in the other canvas's scene, when
+        the pointer is over that canvas; else None."""
+        peer = self.peer
+        if peer is None or not peer.isVisible():
+            DRAG_LOG.info("canvas %s: no other canvas shown", self.canvas)
+            return None
+        point = self.viewport().mapToGlobal(self.mapFromScene(scene_pos))
+        local = peer.viewport().mapFromGlobal(point)
+        area = peer.viewport().rect()
+        if not area.contains(local):
+            # Anywhere over the other canvas counts, its track names included:
+            # the drop lands at the nearest point of its timeline.
+            pane = peer.parentWidget() or peer
+            if not pane.rect().contains(pane.mapFromGlobal(point)):
+                DRAG_LOG.info(
+                    "canvas %s: pointer %s is not over canvas %s (its area %s at %s)",
+                    self.canvas, point.toTuple(), peer.canvas, pane.rect().getRect(),
+                    pane.mapToGlobal(QPoint(0, 0)).toTuple(),
+                )
+                return None
+            local = QPoint(
+                min(max(local.x(), area.left()), area.right()),
+                min(max(local.y(), area.top()), area.bottom()),
+            )
+        return peer.mapToScene(local)
+
+    def show_drop_ghost(self, left_top: QPointF | None, width: float, height: float, clip: ClipItem | None) -> None:
+        """Outline where a bar block from the other canvas would land."""
+        ghost = self._block_ghost
+        if left_top is None:
+            if ghost is not None and isValid(ghost) and self._block_drag is None:
+                self.scene_obj.removeItem(ghost)
+                try:
+                    self._retained.remove(ghost)
+                except ValueError:
+                    pass
+            if self._block_drag is None:
+                self._block_ghost = None
+            return
+        if ghost is None or not isValid(ghost):
+            ghost = QGraphicsRectItem(0, 0, 8, 8)
+            ghost.setZValue(12)
+            ghost.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            if clip is not None:
+                ghost.setBrush(QBrush(clip.brush()))
+                ghost.setPen(QPen(clip._accent, 1, Qt.PenStyle.DashLine))
+            self.scene_obj.addItem(self._keep(ghost))
+            self._block_ghost = ghost
+        left = HEADER_WIDTH if self._args is None else max(float(HEADER_WIDTH), float(left_top.x()))
+        if clip is not None:
+            left = clip._arrangement_x(left)
+        row, _primary = self._row_under(float(left_top.y()))
+        ghost.setPos(left, self._row_top_of(row) + 4)
+        ghost.setRect(0, 0, max(8.0, float(width)), max(8.0, float(height)))
+
+    # -- picked bars ---------------------------------------------------
+
+    def _clip_items(self) -> list:
+        return [item for item in self.scene_obj.items() if isinstance(item, ClipItem) and isValid(item)]
+
+    @staticmethod
+    def _spans_of(clip: ClipItem) -> tuple:
+        """A clip's bar blocks; a clip without bar lines is one block."""
+        if clip._block_spans:
+            return clip._block_spans
+        return ((0, 0.0, float(clip.rect().width()), 0.0, float(clip._duration)),)
+
+    def picks(self) -> dict[int, set[int]]:
+        """Picked bars: track index -> bar numbers."""
+        return {index: set(bars) for index, bars in self._picks.items() if bars}
+
+    def set_picks(self, picks: dict) -> None:
+        self._picks = {int(index): set(bars) for index, bars in picks.items() if bars}
+        self._apply_picks()
+
+    def pick_whole_clips(self, indices) -> None:
+        """Pick every bar of these clips (used after a move, so the moved
+        bars stay picked and can be dragged on together)."""
+        picks = {}
+        for clip in self._clip_items():
+            if clip.clip_index in indices:
+                picks[clip.clip_index] = {int(span[0]) for span in self._spans_of(clip)}
+        self.set_picks(picks)
+
+    def _apply_picks(self) -> None:
+        for clip in self._clip_items():
+            wanted = set(self._picks.get(clip.clip_index, set()))
+            if not clip._block_spans and wanted:
+                clip._block_spans = self._spans_of(clip)
+            if clip.picked != wanted:
+                clip.picked = wanted
+                clip.update()
+
+    def picked_blocks(self) -> list[tuple]:
+        """[(track index, local start, local duration, bar, clip, span)]"""
+        found = []
+        for clip in self._clip_items():
+            for span in self._spans_of(clip):
+                if span[0] in clip.picked:
+                    found.append((clip.clip_index, float(span[3]), float(span[4]) - float(span[3]), int(span[0]), clip, span))
+        found.sort(key=lambda item: (item[0], item[1]))
+        return found
+
+    def show_ghosts(self, rects) -> None:
+        """Outline where dragged items would land: [(QRectF, QColor)]."""
+        for ghost in self._ghosts:
+            if isValid(ghost):
+                self.scene_obj.removeItem(ghost)
+            try:
+                self._retained.remove(ghost)
+            except ValueError:
+                pass
+        self._ghosts = []
+        for rect, colour in rects:
+            ghost = QGraphicsRectItem(rect)
+            ghost.setBrush(QBrush(QColor(colour.red(), colour.green(), colour.blue(), 70)))
+            ghost.setPen(QPen(QColor("#D7B36A"), 1.2, Qt.PenStyle.DashLine))
+            ghost.setZValue(25)
+            ghost.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.scene_obj.addItem(self._keep(ghost))
+            self._ghosts.append(ghost)
+
+    def _landing(self, view, grabbed_left: float, grabbed_row_offset: int, pointer_y: float, items):
+        """Where ``items`` [(left, width, height, source row)] land in ``view``
+        when the grabbed one's left edge goes to ``grabbed_left`` and its row
+        is the one under ``pointer_y``. Returns (target row, rects)."""
+        target_row, _primary = view._row_under(pointer_y)
+        tracks = view._args[0] if view._args else []
+        _rows, primaries = view.lane_rows(tracks)
+        rects = []
+        for left, width, height, row in items:
+            wanted = max(0, target_row + row - grabbed_row_offset)
+            if wanted < len(primaries):
+                top = view._row_top_of(wanted)
+            else:  # new rows stack below the last one
+                top = view._display_top(len(primaries), primaries) + (wanted - len(primaries)) * view.track_height
+            rects.append(QRectF(grabbed_left + (left - items[0][0]), top + 4, width, height))
+        return target_row, rects
+
+    def _drag_group(self, clip, span, scene_pos, origin) -> None:
+        """Dragging the picked bars: outlines follow the pointer, on this
+        canvas or the other one. ``clip`` None ends the selection."""
+        if clip is None:
+            if self._picks:
+                self.set_picks({})
+            return
+        tracks = self._args[0] if self._args else []
+        rows, _ = self.lane_rows(tracks)
+        if self._group_drag is None:
+            blocks = self.picked_blocks()
+            grabbed = next(
+                (n for n, item in enumerate(blocks) if item[0] == clip.clip_index and item[3] == int(span[0])), 0
+            )
+            ordered = [blocks[grabbed]] + [item for n, item in enumerate(blocks) if n != grabbed]
+            self._group_drag = {
+                "blocks": blocks,
+                "grabbed": grabbed,
+                "items": [
+                    (item[4].pos().x() + float(item[5][1]), float(item[5][2]) - float(item[5][1]), item[4].rect().height(),
+                     rows[item[0]] if item[0] < len(rows) else 0, item[4]._accent)
+                    for item in ordered
+                ],
+                "grab": float(origin.x()) - (clip.pos().x() + float(span[1])),
+            }
+        drag = self._group_drag
+        items = [(left, width, height, row) for left, width, height, row, _colour in drag["items"]]
+        colours = [colour for *_rest, colour in drag["items"]]
+        peer_pos = self._peer_scene_pos(scene_pos)
+        view, point = (self.peer, peer_pos) if peer_pos is not None else (self, scene_pos)
+        left = clip._arrangement_x(float(point.x()) - drag["grab"])
+        target_row, rects = self._landing(view, left, items[0][3], float(point.y()), items)
+        drag["target"] = (view.canvas, target_row, (left - items[0][0]) / self.pixels_per_second)
+        view.show_ghosts(list(zip(rects, colours)))
+        other = self.peer if view is self else self
+        if other is not None:
+            other.show_ghosts([])
+
+    def _drop_group(self, clip, span, scene_pos, origin) -> None:
+        self._drag_group(clip, span, scene_pos, origin)
+        drag, self._group_drag = self._group_drag, None
+        self.show_ghosts([])
+        if self.peer is not None:
+            self.peer.show_ghosts([])
+        if drag is None or "target" not in drag:
+            return
+        canvas, target_row, shift = drag["target"]
+        blocks = [(item[0], item[1], item[2], item[3]) for item in drag["blocks"]]
+        DRAG_LOG.info("canvas %s: %s picked bars dropped on canvas %s row %s, shift %.3f s",
+                      self.canvas, len(blocks), canvas, target_row, shift)
+        grabbed = drag["grabbed"]
+        QTimer.singleShot(
+            0, lambda: self.blocks_move_requested.emit(blocks, grabbed, shift, canvas, target_row)
+        )
+
+    def _preview_on_peer(self, clip, scene_pos) -> None:
+        """While whole clips are dragged over the other canvas, outline all
+        of them there (the clips themselves are cut off at this canvas's edge)."""
+        if self.peer is None:
+            return
+        peer_pos = self._peer_scene_pos(scene_pos) if scene_pos is not None else None
+        if peer_pos is None:
+            self.peer.show_ghosts([])
+            return
+        tracks = self._args[0] if self._args else []
+        rows, _ = self.lane_rows(tracks)
+        selected = [item for item in self._clip_items() if item.isSelected() or item is clip]
+        selected.sort(key=lambda item: (item is not clip, item.clip_index))
+        items = [(item.pos().x(), item.rect().width(), item.rect().height(),
+                  rows[item.clip_index] if item.clip_index < len(rows) else 0) for item in selected]
+        grab = float(scene_pos.x()) - float(clip.pos().x())
+        left = clip._arrangement_x(float(peer_pos.x()) - grab)
+        _row, rects = self._landing(self.peer, left, items[0][3], float(peer_pos.y()), items)
+        self.peer.show_ghosts(list(zip(rects, [item._accent for item in selected])))
+
+    def _snap_to_row(self, clip: ClipItem, y: float) -> float:
+        """y for a dragged clip: the same inset in the row under its middle."""
+        tracks = self._args[0] if self._args else []
+        rows, primaries = self.lane_rows(tracks)
+        if not primaries or clip.clip_index >= len(rows) or rows[clip.clip_index] < 0:
+            return clip._locked_y
+        inset = clip._locked_y - self._display_top(rows[clip.clip_index], primaries)
+        row, _primary = self._row_under(float(y) + clip.rect().height() / 2)
+        return self._row_top_of(row) + inset
+
+    def _drop_clip_on_row(self, clip: ClipItem) -> bool:
+        """A dragged clip released over another row moves to that row."""
+        tracks = self._args[0] if self._args else []
+        rows, _primaries = self.lane_rows(tracks)
+        if clip.clip_index >= len(rows) or rows[clip.clip_index] < 0:
+            return False
+        row, _primary = self._row_under(float(clip.pos().y()) + clip.rect().height() / 2)
+        if row == rows[clip.clip_index]:
+            return False
+        index = clip.clip_index
+        QTimer.singleShot(0, lambda: self.row_move_requested.emit(index, row))
+        return True
+
+    def _drop_clip_on_peer(self, clip: ClipItem, scene_pos: QPointF, press: QPointF) -> bool:
+        """Clips released over the other canvas move there: the grabbed one
+        and every other selected clip on this canvas, keeping their spacing."""
+        peer_pos = self._peer_scene_pos(scene_pos)
+        if peer_pos is None:
+            return False
+        tracks = self._args[0] if self._args else []
+        grab = float(scene_pos.x()) - float(clip.pos().x())
+        left = clip._arrangement_x(float(peer_pos.x()) - grab)
+        start = max(0.0, (left - HEADER_WIDTH) / self.pixels_per_second)
+        current = float(tracks[clip.clip_index].get("start", 0.0) or 0.0) if clip.clip_index < len(tracks) else 0.0
+        indices = sorted({clip.clip_index, *self.selected_indices()})
+        row, _primary = self.peer._row_under(float(peer_pos.y()))
+        grabbed = clip.clip_index
+        DRAG_LOG.info("canvas %s: clips %s dropped on canvas %s row %s, shift %.3f s",
+                      self.canvas, indices, self.peer.canvas, row, start - current)
+        QTimer.singleShot(
+            0, lambda: self.canvas_drop_requested.emit(indices, grabbed, start - current, row)
+        )
+        return True
 
     def set_loop_region(self, start, end) -> None:
         """Shade an arrangement span. Seconds come from the caller."""
@@ -995,6 +1890,22 @@ class TimelineView(QGraphicsView):
             return -1
         return index
 
+    def bar_under(self, view_pos) -> int:
+        """Zero-based bar under a viewport position, or -1 before the first line."""
+        if not self._bar_lines:
+            return -1
+        pos = self.mapToScene(view_pos)
+        if pos.x() < HEADER_WIDTH:
+            return -1
+        seconds = max(0.0, (pos.x() - HEADER_WIDTH) / self.pixels_per_second)
+        return bar_index(self._bar_lines, seconds, self._bar_fallback)
+
+    def _downbeat_pressed(self, clip, local: float, screen) -> None:
+        start = max(0.0, (float(clip.pos().x()) - HEADER_WIDTH) / self.pixels_per_second)
+        index = bar_index(self._bar_lines, start + float(local), self._bar_fallback) if self._bar_lines else -1
+        point = screen.toPoint() if hasattr(screen, "toPoint") else screen
+        self.downbeat_clicked.emit(int(index), point)
+
     def bar_tooltip(self, index: int) -> str:
         start, end = bar_span(self._bar_lines, index, self._bar_fallback)
         return f"Bar {index + 1}\nStart {format_clock(start)}\nEnd   {format_clock(end)}\nLength {end - start:.3f} s"
@@ -1028,11 +1939,42 @@ class TimelineView(QGraphicsView):
                 self._bar_press_x = float(event.position().x())
                 event.accept()
                 return
+        if event.button() == Qt.MouseButton.MiddleButton:
+            # Middle-drag pans the canvas.
+            self._canvas_pan = (
+                QPointF(event.position()),
+                self.horizontalScrollBar().value(),
+                self.verticalScrollBar().value(),
+            )
+            self._canvas_panned = False
+            event.accept()
+            return
+        self._empty_press = None
         if event.button() == Qt.MouseButton.LeftButton:
             view_pos = event.position().toPoint()
             if self.clip_at(view_pos) is None:
                 pos = self.mapToScene(view_pos)
-                if pos.x() >= HEADER_WIDTH:
+                if pos.x() >= HEADER_WIDTH and pos.y() > RULER_HEIGHT:
+                    # Left-drag on empty space draws a selection box; a click
+                    # there moves the playhead. The box picks bars; with
+                    # Shift it selects whole tracks (the view's rubber band);
+                    # with Ctrl it adds bars to the ones already picked.
+                    self._empty_press = QPointF(event.position())
+                    if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                        add = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                        if not add:
+                            self.set_picks({})
+                            self.scene_obj.clearSelection()
+                        band = QGraphicsRectItem(QRectF(pos, pos))
+                        band.setPen(QPen(QColor("#D7B36A"), 1, Qt.PenStyle.DashLine))
+                        band.setBrush(QBrush(QColor(215, 179, 106, 30)))
+                        band.setZValue(30)
+                        band.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                        self.scene_obj.addItem(self._keep(band))
+                        self._band = (pos, band, add)
+                        event.accept()
+                        return
+                elif pos.x() >= HEADER_WIDTH:
                     seconds = (pos.x() - HEADER_WIDTH) / self.pixels_per_second
                     self.seek_requested.emit(max(0.0, seconds))
         super().mousePressEvent(event)
@@ -1043,6 +1985,22 @@ class TimelineView(QGraphicsView):
         return max(0.0, (x - HEADER_WIDTH) / self.pixels_per_second)
 
     def mouseMoveEvent(self, event):
+        if self._band is not None:
+            origin, band, _add = self._band
+            if isValid(band):
+                band.setRect(QRectF(origin, self.mapToScene(event.position().toPoint())).normalized())
+            event.accept()
+            return
+        if self._canvas_pan is not None and event.buttons() & Qt.MouseButton.MiddleButton:
+            origin, scroll_x, scroll_y = self._canvas_pan
+            delta = event.position() - origin
+            if abs(delta.x()) + abs(delta.y()) >= 4:
+                self._canvas_panned = True
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.horizontalScrollBar().setValue(int(scroll_x - delta.x()))
+            self.verticalScrollBar().setValue(int(scroll_y - delta.y()))
+            event.accept()
+            return
         if self._bar_drag is not None:
             index, guide = self._bar_drag
             seconds = self._drag_seconds(event)
@@ -1066,6 +2024,46 @@ class TimelineView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._canvas_pan is not None and event.button() == Qt.MouseButton.MiddleButton:
+            self._canvas_pan = None
+            self._canvas_panned = False
+            self.viewport().unsetCursor()
+            event.accept()
+            return
+        if self._band is not None and event.button() == Qt.MouseButton.LeftButton:
+            origin, band, add = self._band
+            self._band = None
+            area = band.rect() if isValid(band) else QRectF()
+            if isValid(band):
+                self.scene_obj.removeItem(band)
+                try:
+                    self._retained.remove(band)
+                except ValueError:
+                    pass
+            empty, self._empty_press = self._empty_press, None
+            if empty is not None and (event.position() - empty).manhattanLength() < 4:
+                self.seek_requested.emit(max(0.0, (origin.x() - HEADER_WIDTH) / self.pixels_per_second))
+                event.accept()
+                return
+            picks = {index: set(bars) for index, bars in self._picks.items()} if add else {}
+            for clip in self._clip_items():
+                for span in self._spans_of(clip):
+                    block = QRectF(clip.pos().x() + float(span[1]), clip.pos().y(), float(span[2]) - float(span[1]), clip.rect().height())
+                    if block.intersects(area):
+                        picks.setdefault(clip.clip_index, set()).add(int(span[0]))
+            self.set_picks(picks)
+            if picks:
+                self.track_selected.emit(min(picks))
+            event.accept()
+            return
+        empty, self._empty_press = getattr(self, "_empty_press", None), None
+        if (
+            empty is not None
+            and event.button() == Qt.MouseButton.LeftButton
+            and (event.position() - empty).manhattanLength() < 4
+        ):
+            pos = self.mapToScene(empty.toPoint())
+            self.seek_requested.emit(max(0.0, (pos.x() - HEADER_WIDTH) / self.pixels_per_second))
         if self._bar_drag is not None and event.button() == Qt.MouseButton.LeftButton:
             index, guide = self._bar_drag
             self._bar_drag = None

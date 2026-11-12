@@ -25,6 +25,7 @@ class TrackHeader(QFrame):
     unavailable = Signal(str)
     arm_changed = Signal(int, bool)
     edit_finished = Signal()
+    rename_requested = Signal(int)
 
     def __init__(self, index: int, track: dict, height: int):
         super().__init__()
@@ -55,6 +56,8 @@ class TrackHeader(QFrame):
         self.number = QLabel(f"{index + 1:02d}")
         self.number.setObjectName("trackIndex")
         self.name_label = QLabel(self._name)
+        self.name_label.setToolTip("Double-click to rename")
+        self.name_label.setCursor(Qt.CursorShape.IBeamCursor)
         # The full filename must not become the header's minimum width.
         # A huge size hint feeds the scroll area, the window grows, and Qt
         # crashes while measuring the text.
@@ -94,6 +97,7 @@ class TrackHeader(QFrame):
         self.handle.setCursor(Qt.CursorShape.SplitVCursor)
         self.handle.setToolTip("Drag to set track height")
         self.handle.installEventFilter(self)
+        self.name_label.installEventFilter(self)
         inner.addWidget(self.handle)
 
         self._apply(track)
@@ -113,6 +117,9 @@ class TrackHeader(QFrame):
         self.mute.pressed.connect(lambda: self.selected.emit(index))
         self.solo.pressed.connect(lambda: self.selected.emit(index))
         self.arm.pressed.connect(lambda: self.selected.emit(index))
+        if height <= 0:
+            self.setFixedHeight(0)
+            self.hide()
 
     def _mark(self, text: str, tip: str) -> QToolButton:
         button = QToolButton()
@@ -178,7 +185,10 @@ class TrackHeader(QFrame):
         super().mousePressEvent(event)
 
     def eventFilter(self, obj, event):
-        if obj is not self.handle:
+        if obj is getattr(self, "name_label", None) and event.type() == QEvent.Type.MouseButtonDblClick:
+            self.rename_requested.emit(self.index)
+            return True
+        if obj is not getattr(self, "handle", None):
             return super().eventFilter(obj, event)
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self._drag = True
@@ -216,9 +226,15 @@ class HeaderColumn(QWidget):
     unavailable = Signal(str)
     arm_changed = Signal(int, bool)
     edit_finished = Signal()
+    rename_requested = Signal(int)
+    # The ▶ in the corner: play (or stop) this canvas on its own.
+    play_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, title: str = "Tracks"):
         super().__init__(parent)
+        self.title = title
+        self._playing = False
+        self.play_button: QToolButton | None = None
         self.setObjectName("headerPane")
         self.setMinimumWidth(208)
         self.setMaximumWidth(340)
@@ -253,10 +269,16 @@ class HeaderColumn(QWidget):
         corner.setFixedHeight(RULER_HEIGHT)
         corner_layout = QHBoxLayout(corner)
         corner_layout.setContentsMargins(10, 0, 8, 0)
-        corner_label = QLabel("Tracks")
+        corner_label = QLabel(self.title)
         corner_label.setObjectName("sectionLabel")
         corner_layout.addWidget(corner_label)
         corner_layout.addStretch(1)
+        self.play_button = QToolButton()
+        self.play_button.setObjectName("playStemBtn")
+        self.play_button.setCheckable(True)
+        self.play_button.clicked.connect(lambda _checked=False: self.play_requested.emit())
+        corner_layout.addWidget(self.play_button)
+        self.set_playing(self._playing)
         self.column.addWidget(corner)
         for index, track in enumerate(tracks):
             height = heights[index] if index < len(heights) else TRACK_HEIGHT
@@ -271,9 +293,22 @@ class HeaderColumn(QWidget):
             header.unavailable.connect(self.unavailable)
             header.arm_changed.connect(self.arm_changed)
             header.edit_finished.connect(self.edit_finished)
+            header.rename_requested.connect(self.rename_requested)
             self.column.addWidget(header)
             self._headers.append(header)
         self.column.addStretch(1)
+
+    def set_playing(self, playing: bool) -> None:
+        """Show whether this canvas is playing on its own."""
+        self._playing = bool(playing)
+        button = self.play_button
+        if button is None:
+            return
+        button.setChecked(self._playing)
+        button.setText("■" if self._playing else "▶")
+        button.setToolTip(
+            f"Stop {self.title.lower()}" if self._playing else f"Play only {self.title.lower()}"
+        )
 
     def set_scene_height(self, height: int):
         self.body.setMinimumHeight(max(1, int(height)))

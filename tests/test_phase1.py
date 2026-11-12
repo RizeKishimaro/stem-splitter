@@ -12,10 +12,10 @@ if "SONICLAB_TEST_CONFIG" not in os.environ:
 
 import numpy as np
 import soundfile as sf
-from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QGraphicsLineItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsLineItem, QMessageBox
 from shiboken6 import isValid
 
 from soniclab.core.audio_engine import OUTPUT_RATE, AudioEngine
@@ -369,6 +369,52 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(horizontal.value(), shifted)
         self.assertLess(vertical.value(), 40)
 
+    def test_dragging_one_block_does_not_move_the_track(self):
+        audio = np.full((OUTPUT_RATE * 4, 2), 0.4, dtype=np.float32)
+        tracks = [{"name": "Song", "start": 0.0, "_audio": audio, "duration": 4.0}]
+        moved = []
+        self.view.on_block_move = lambda *args: moved.append(args)
+        self.view.resize(900, 240)
+        self.view.rebuild(tracks, lambda index, seconds: moved.append(("track", index, seconds)), 120, "4/4")
+        self.view.show()
+        self.app.processEvents()
+        clip = self._clips()[0]
+        self.assertGreater(len(clip._block_spans), 1)
+        origin_x = clip.pos().x()
+        local = QPointF(clip.pos().x() + 200, clip.pos().y() + 40)
+        view_pt = self.view.mapFromScene(local)
+
+        def send(kind, point, buttons):
+            # Ctrl (⌘ on macOS) takes one bar; a plain drag moves the track.
+            event = QMouseEvent(
+                kind,
+                QPointF(point),
+                QPointF(self.view.viewport().mapToGlobal(point)),
+                Qt.MouseButton.LeftButton,
+                buttons,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            QApplication.sendEvent(self.view.viewport(), event)
+            self.app.processEvents()
+
+        send(QEvent.Type.MouseButtonPress, view_pt, Qt.MouseButton.LeftButton)
+        send(QEvent.Type.MouseMove, view_pt + QPoint(180, 0), Qt.MouseButton.LeftButton)
+        send(QEvent.Type.MouseButtonRelease, view_pt + QPoint(180, 0), Qt.MouseButton.NoButton)
+        self.app.processEvents()
+        self.assertAlmostEqual(clip.pos().x(), origin_x)
+        self.assertEqual(tracks[0]["start"], 0.0)
+        self.assertFalse(any(item[0] == "track" for item in moved))
+        self.assertTrue(moved)
+        index, local_start, local_duration, new_start, share, _insert_at, bar, canvas, join = moved[-1]
+        self.assertIsNone(canvas)
+        self.assertFalse(join)  # same row: the bar stays on its own track
+        self.assertEqual(index, 0)
+        self.assertEqual(bar, 1)
+        self.assertTrue(share)
+        self.assertAlmostEqual(local_start, 2.0, places=3)
+        self.assertAlmostEqual(local_duration, 2.0, places=3)
+        self.assertAlmostEqual(new_start, 4.0, places=3)
+
 
 class MainWindowTests(unittest.TestCase):
     @classmethod
@@ -585,6 +631,145 @@ class MainWindowTests(unittest.TestCase):
             self.assertGreater(restored_clip.envelope[0].size, 50)
         finally:
             restored.close()
+
+    def test_moved_block_stays_on_the_track_and_keeps_its_audio(self):
+        audio = np.zeros((OUTPUT_RATE * 4, 2), dtype=np.float32)
+        audio[: OUTPUT_RATE * 2] = 0.25
+        audio[OUTPUT_RATE * 2 :] = 0.8
+        self.window.project.tracks.append(
+            {
+                "name": "Song",
+                "path": None,
+                "start": 0.0,
+                "duration": 4.0,
+                "offset": 0.0,
+                "_audio": audio,
+            }
+        )
+        self.window._move_block(0, 2.0, 2.0, 4.0, True, 1, 1)
+        tracks = self.window.project.tracks
+        self.assertEqual(len(tracks), 2)
+        self.assertAlmostEqual(tracks[0]["start"], 0.0)
+        self.assertAlmostEqual(tracks[0]["duration"], 2.0)
+        self.assertAlmostEqual(tracks[1]["start"], 4.0)
+        self.assertAlmostEqual(tracks[1]["offset"], 2.0)
+        self.assertAlmostEqual(tracks[1]["duration"], 2.0)
+        self.assertEqual(tracks[0].get("lane"), tracks[1].get("lane"))
+        early = self.window.engine.render(0, 64)
+        gap = self.window.engine.render(2 * OUTPUT_RATE, 64)
+        late = self.window.engine.render(4 * OUTPUT_RATE, 64)
+        self.assertAlmostEqual(float(early[0, 0]), 0.25, places=3)
+        self.assertAlmostEqual(float(gap[0, 0]), 0.0, places=3)
+        self.assertAlmostEqual(float(late[0, 0]), 0.8, places=3)
+        clips = [
+            item
+            for item in self.window.timeline.scene_obj.items()
+            if isinstance(item, ClipItem) and isValid(item)
+        ]
+        self.assertEqual(len(clips), 2)
+        self.assertAlmostEqual(clips[0].pos().y(), clips[1].pos().y())
+
+
+    def test_a_track_cut_into_bars_moves_whole_again_and_again(self):
+        # Regression: once downbeats cut a track into bar blocks, a plain drag
+        # only pulled one bar out, so the track could be moved once (before
+        # the analysis finished) and never again.
+        audio = np.full((OUTPUT_RATE * 8, 2), 0.5, dtype=np.float32)
+        window = self.window
+        window.project.tracks.append(
+            {"name": "drums", "path": None, "start": 0.0, "duration": 8.0, "offset": 0.0, "_audio": audio}
+        )
+        window.project.bars = [0.0, 2.0, 4.0, 6.0, 8.0]
+        window._reload_engine()
+        window._refresh_timeline()
+        view = window.timeline
+        view.resize(1400, 300)
+        window.show()
+        self.app.processEvents()
+        track = window.project.tracks[0]
+        for expected in (1.0, 2.0, 3.0):
+            clip = next(item for item in view.scene_obj.items() if isinstance(item, ClipItem) and isValid(item))
+            self.assertGreater(len(clip._block_spans), 1)
+            point = view.mapFromScene(QPointF(clip.pos().x() + 0.3 * PIXELS_PER_SECOND, clip.pos().y() + clip.rect().height() * 0.75))
+            target = point + QPoint(int(PIXELS_PER_SECOND), 0)
+            for kind, at, buttons in (
+                (QEvent.Type.MouseButtonPress, point, Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseMove, point + QPoint(int(PIXELS_PER_SECOND) // 2, 0), Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseMove, target, Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseButtonRelease, target, Qt.MouseButton.NoButton),
+            ):
+                event = QMouseEvent(kind, QPointF(at), QPointF(view.viewport().mapToGlobal(at)),
+                                    Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+                QApplication.sendEvent(view.viewport(), event)
+                self.app.processEvents()
+            self.app.processEvents()
+            self.assertEqual(len(window.project.tracks), 1)  # moved, not cut
+            self.assertAlmostEqual(track["start"], expected, places=2)
+            self.assertAlmostEqual(track["duration"], 8.0)
+        self.assertAlmostEqual(float(window.engine.render(int(3.1 * OUTPUT_RATE), 4)[0, 0]), 0.5, places=3)
+        self.assertAlmostEqual(float(window.engine.render(int(2.9 * OUTPUT_RATE), 4)[0, 0]), 0.0, places=3)
+
+    def test_a_moved_bar_can_be_dragged_again_as_one_piece(self):
+        # Regression: a bar dropped off the bar grid (here one beat late) was
+        # cut in two at the next redraw, so a second drag tore half of it off
+        # instead of moving it.
+        audio = np.zeros((OUTPUT_RATE * 8, 2), dtype=np.float32)
+        audio[OUTPUT_RATE * 2 : OUTPUT_RATE * 4] = 0.5
+        window = self.window
+        window.project.tracks.append(
+            {"name": "drums", "path": None, "start": 0.0, "duration": 8.0, "offset": 0.0, "_audio": audio}
+        )
+        window.project.bars = [0.0, 2.0, 4.0, 6.0, 8.0]
+        window._reload_engine()
+        window._refresh_timeline()
+        window._move_block(0, 2.0, 2.0, 2.5, True, 1, 1)  # bar 2 lands one beat late, off the bar grid
+        piece = next(track for track in window.project.tracks if track["name"] == "drums · bar 2")
+        self.assertTrue(piece["bar_block"])
+        view = window.timeline
+        view.resize(1200, 300)
+        window.show()
+        self.app.processEvents()
+
+        def piece_clip():
+            index = window.project.tracks.index(piece)
+            return next(
+                item for item in view.scene_obj.items()
+                if isinstance(item, ClipItem) and isValid(item) and item.clip_index == index
+            )
+
+        def drag(clip, dx):
+            point = view.mapFromScene(QPointF(clip.pos().x() + 20, clip.pos().y() + clip.rect().height() * 0.75))
+            for kind, at, buttons in (
+                (QEvent.Type.MouseButtonPress, point, Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseMove, point + QPoint(dx // 2, 0), Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseMove, point + QPoint(dx, 0), Qt.MouseButton.LeftButton),
+                (QEvent.Type.MouseButtonRelease, point + QPoint(dx, 0), Qt.MouseButton.NoButton),
+            ):
+                event = QMouseEvent(kind, QPointF(at), QPointF(view.viewport().mapToGlobal(at)),
+                                    Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier)
+                QApplication.sendEvent(view.viewport(), event)
+                self.app.processEvents()
+            self.app.processEvents()
+
+        count = len(window.project.tracks)
+        for expected in (3.5, 4.5):
+            clip = piece_clip()
+            self.assertEqual(len(clip._block_spans), 1)  # straddles a bar line, still one block
+            self.assertTrue(clip.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            drag(clip, int(PIXELS_PER_SECOND))
+            self.assertEqual(len(window.project.tracks), count)  # moved, not split again
+            self.assertAlmostEqual(piece["start"], expected, places=2)
+            self.assertAlmostEqual(piece["offset"], 2.0)
+            self.assertAlmostEqual(piece["duration"], 2.0)
+        # The whole bar plays at its new place.
+        start = int(4.6 * OUTPUT_RATE)
+        self.assertAlmostEqual(float(window.engine.render(start, 8)[0, 0]), 0.5, places=3)
+        self.assertAlmostEqual(float(window.engine.render(int(6.4 * OUTPUT_RATE), 8)[0, 0]), 0.5, places=3)
+
+        # Saved and reopened, the piece is still one block.
+        window.project.tracks[:] = [dict(track, _audio=track["_audio"]) for track in window.project.tracks]
+        window._refresh_timeline()
+        self.assertEqual(len(piece_clip()._block_spans), 1)
 
 
 def tearDownModule():

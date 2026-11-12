@@ -18,6 +18,27 @@ void styleTempoSlider(juce::Slider& slider, const juce::String& tooltip) {
 // The tracker counts quarter-note beats, so a bar of 4 is shown as 4/4.
 juce::String meterText(int beatsPerBar) { return beatsPerBar > 0 ? juce::String(beatsPerBar) + "/4" : juce::String("-"); }
 
+// Where the live input is: the last live beat, if it is recent. Bars are
+// counted from the first downbeat heard since the analysis started.
+struct LivePosition {
+    bool active = false;  // a beat within the last two beat periods
+    int bar = 0;
+    int beat = 0;
+};
+
+LivePosition livePosition(const std::vector<soniclab::AnalysisMarker>& markers, double rate, double now, float bpm) {
+    LivePosition out;
+    if (markers.empty() || rate <= 0.0 || bpm <= 0.0f) return out;
+    const auto& last = markers.back();
+    const auto period = 60.0 / static_cast<double>(bpm);
+    out.active = now - last.seconds(rate) <= 2.0 * period + 0.3;  // 0.3 s: the tracker's reporting delay
+    out.beat = last.beatInBar;
+    out.bar = static_cast<int>(std::count_if(markers.begin(), markers.end(), [](const soniclab::AnalysisMarker& m) {
+        return m.kind == soniclab::MarkerKind::Downbeat;
+    }));
+    return out;
+}
+
 int countKind(const std::vector<soniclab::AnalysisMarker>& markers, soniclab::MarkerKind kind) {
     return static_cast<int>(std::count_if(markers.begin(), markers.end(),
                                           [&](const AnalysisMarker& marker) { return marker.kind == kind; }));
@@ -99,7 +120,12 @@ void BeatAnalyzerEditor::layoutContent(juce::Rectangle<int> area) {
 
 void BeatAnalyzerEditor::tick() {
     const auto& file = fileResult();
-    fileTimeline_ = file.status == FileAnalysisResult::Status::Done;
+    // The lane follows the live input while it has a beat; otherwise it
+    // shows the whole timeline of a finished file.
+    const auto live = processor_.analysisEnabled() ? processor_.liveSummary() : analysis::AnalysisSummary{};
+    const bool hearing =
+        livePosition(processor_.markers(), processor_.sampleRate(), analysedSeconds(), live.tempoBpm).active;
+    fileTimeline_ = file.status == FileAnalysisResult::Status::Done && !hearing;
     if (fileTimeline_)
         liveLane().showSpan(file.markers, file.sampleRate, 0.0, std::max(file.lengthSeconds(), 0.001));
     repaint(lcdArea_);
@@ -191,10 +217,14 @@ void BeatAnalyzerEditor::paintContent(juce::Graphics& g) {
     g.setColour(kTextDim);
     const auto dropped = processor_.pipeline().droppedFrames();
     juce::String heard = "no audio yet";
+    const auto position = livePosition(processor_.markers(), processor_.sampleRate(), analysedSeconds(), live.tempoBpm);
     if (!enabled) heard = "analysis off";
-    else if (showingFile) heard = "from file";
-    else if (haveTempo) heard = "listening";
     else if (dropped > 0) heard = "dropped " + juce::String(static_cast<juce::int64>(dropped));
+    else if (showingFile) heard = "from file";
+    else if (position.active && position.beat > 0) heard = "bar " + juce::String(position.bar) + "  beat " + juce::String(position.beat);
+    else if (position.active) heard = "beat found, finding the bar";
+    else if (haveTempo) heard = "listening";
+    else if (analysedSeconds() > 0.5) heard = "finding the beat";
     g.drawText(heard, lcd, juce::Justification::centredRight, true);
 
     drawSectionLabel(g, "Audio file", fileLabelArea_);

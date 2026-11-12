@@ -497,6 +497,42 @@ EOF
     return 0
 }
 
+install_beat_analysis() {
+    step "Preparing beat analysis..."
+    log "--- beat analysis ---"
+    note "Beat analysis uses madmom-infer. Its pretrained weights are non-commercial and are downloaded into your cache, not shipped with SonicLab."
+    if [[ -f "${PROJECT_ROOT}/tools/madmom_infer_worker.py" ]]; then
+        cp "${PROJECT_ROOT}/tools/madmom_infer_worker.py" "${SUPPORT}/madmom_infer_worker.py"
+    fi
+    if [[ "${SONICLAB_MADMOM_LEGACY:-}" == "1" ]]; then
+        note "SONICLAB_MADMOM_LEGACY=1, so the older Madmom 0.16 setup is used."
+        install_madmom
+        return
+    fi
+    if [[ -x "${VENV}/bin/python" ]] && "${VENV}/bin/python" -c "import madmom_infer" >/dev/null 2>&1; then
+        if "${VENV}/bin/python" "${MACOS_DIR}/lib/verify_infer.py" >>"${LOG_DIR}/install.log" 2>&1; then
+            touch "${SUPPORT}/.soniclab-infer-ready"
+            note "Beat analysis is already working, so its libraries were left in place."
+            return
+        fi
+        note "The existing beat-analysis check failed. SonicLab will reinstall madmom-infer."
+        rm -f "${SUPPORT}/.soniclab-infer-ready"
+    fi
+    if ! pip_install "${VENV}/bin/python" "madmom-infer @ git+https://github.com/openmirlab/madmom-infer.git@bffead9be61857fd44b2e0d3a2510d9d94c8f2d2"; then
+        warn "madmom-infer could not be installed. SonicLab will try the older Madmom setup. SonicLab will still open."
+        install_madmom
+        return
+    fi
+    if ! "${VENV}/bin/python" "${MACOS_DIR}/lib/verify_infer.py" >>"${LOG_DIR}/install.log" 2>&1; then
+        rm -f "${SUPPORT}/.soniclab-infer-ready"
+        warn "madmom-infer was installed, but it could not track a test recording. SonicLab will try the older Madmom setup."
+        install_madmom
+        return
+    fi
+    touch "${SUPPORT}/.soniclab-infer-ready"
+    note "Beat analysis is ready. A test click was tracked at about 120 BPM."
+}
+
 install_madmom() {
     step "Preparing beat analysis..."
     log "--- madmom ---"
@@ -576,7 +612,7 @@ soniclab_install() {
     ensure_python
     install_application
     install_demucs
-    install_madmom
+    install_beat_analysis
     if ! bash "${MACOS_DIR}/build_app.sh" "${SUPPORT}/SonicLab.app" >>"${LOG_DIR}/install.log" 2>&1; then
         die "The SonicLab application could not be created. The log has the details."
     fi
@@ -670,7 +706,10 @@ Remove SonicLab?" "Cancel" "Remove" "Cancel")"
     remove_bundle "${HOME}/Applications/SonicLab.app"
     remove_bundle "${HOME}/Desktop/SonicLab.app"
     remove_bundle "${SUPPORT}/SonicLab.app"
-    rm -rf "${VENV}" "${DEMUCS_VENV}" "${MADMOM_VENV}" "${SUPPORT}/madmom_worker.py" "${SUPPORT}/cache"
+    rm -rf "${VENV}" "${DEMUCS_VENV}" "${MADMOM_VENV}" "${SUPPORT}/madmom_worker.py" "${SUPPORT}/madmom_infer_worker.py" "${SUPPORT}/.soniclab-infer-ready" "${SUPPORT}/cache" "${HOME}/.cache/madmom_infer"
+    if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+        rm -rf "${XDG_CACHE_HOME}/madmom_infer"
+    fi
     note "Removed SonicLab's installed program files."
 
     choice="$(ask "Also remove downloaded AI models and stem files that SonicLab stored in its own library folder?

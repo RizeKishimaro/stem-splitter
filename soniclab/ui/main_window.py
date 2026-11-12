@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 import soundfile as sf
 from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QFont, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QFont, QKeySequence
 from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from soniclab.core.alignment import classify_onsets, matched_errors, nudged_alignment
+from soniclab.core.tempo import stretch as stretch_audio
 from soniclab.core.audio_engine import OUTPUT_RATE, AudioEngine
 from soniclab.core.downbeat_loop import downbeat_loop_region, loop_shortcut
 from soniclab.core.bar_export import (
@@ -113,10 +114,12 @@ from soniclab.ui.visualizer import Visualizer
 from soniclab.ui.timeline import (
     HEADER_WIDTH,
     PIXELS_PER_SECOND,
+    RULER_HEIGHT,
     TRACK_HEIGHT,
     ClipItem,
     TimelineView,
     parse_time_signature,
+    track_canvas,
 )
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".mp3"}
@@ -157,6 +160,15 @@ class MainWindow(QMainWindow):
         self._stem_sources: dict[str, str] = {}
         self.current_path = None
         self._selected = -1
+        # None: both canvases are heard. 0 or 1: only that canvas (its ▶ button).
+        self._canvas_focus: int | None = None
+        self._sized_rows = -1  # second-canvas rows when it was last sized
+        # Where each canvas's playhead rests. A canvas's playhead moves only
+        # while that canvas is heard, or (stopped) when it was the one clicked.
+        self._canvas_positions = [0.0, 0.0]
+        self._active_canvas = 0
+        self._hover_canvas = 0  # the canvas the mouse was over last; Play plays it
+        self._lane_ids = 1
         self._gesture_before = None
         self._history_frozen = False
         self._record_started_at = 0.0
@@ -215,23 +227,58 @@ class MainWindow(QMainWindow):
         self.stem_banner.setVisible(False)
         self.arrangement_layout.insertWidget(0, self.stem_banner)
 
+    def _canvas_pair(self, canvas: int):
+        headers = HeaderColumn(title="Tracks" if canvas == 0 else "Canvas 2")
+        timeline = TimelineView(canvas=canvas)
+        timeline.setMinimumWidth(320)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(1)
+        splitter.addWidget(headers)
+        splitter.addWidget(timeline)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([228, 1100])
+        return headers, timeline, splitter
+
     def _build_arrangement(self):
-        self.headers = HeaderColumn()
-        self.timeline = TimelineView()
-        self.timeline.setMinimumWidth(320)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(1)
-        self.splitter.addWidget(self.headers)
-        self.splitter.addWidget(self.timeline)
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([228, 1100])
+        # Two canvases, one above the other. Both are part of the same song:
+        # every track plays, whichever canvas it is drawn on. The second
+        # canvas is hidden until it is used or turned on (View menu).
+        self.headers, self.timeline, self.splitter = self._canvas_pair(0)
+        self.headers2, self.timeline2, self.splitter2 = self._canvas_pair(1)
+        self.timeline2.setMinimumHeight(140)
+        self.timeline2.empty_text = (
+            "Second canvas. Drag a track here, or Ctrl-drag (⌘-drag) a bar to put it here. "
+            "Everything on it plays with the song."
+        )
+        self.timeline.peer = self.timeline2
+        self.timeline2.peer = self.timeline
+        self.canvas_split = QSplitter(Qt.Orientation.Vertical)
+        self.canvas_split.setChildrenCollapsible(False)
+        self.canvas_split.setHandleWidth(3)
+        self.canvas_split.addWidget(self.splitter)
+        self.canvas_split.addWidget(self.splitter2)
+        self.canvas_split.setStretchFactor(0, 3)
+        self.canvas_split.setStretchFactor(1, 2)
+        self.splitter2.setVisible(False)
+        # Stacked, the canvases share one time axis: they scroll together so
+        # bars line up. Side by side, each scrolls on its own, so two parts of
+        # the song can be seen at once. Zoom is always shared.
+        self.canvas_side_by_side = False
+        self.splitter.splitterMoved.connect(lambda *_: self._match_header_widths(self.splitter, self.splitter2))
+        self.splitter2.splitterMoved.connect(lambda *_: self._match_header_widths(self.splitter2, self.splitter))
+        self.timeline.horizontalScrollBar().valueChanged.connect(
+            lambda value: self._follow_scroll(self.timeline2, value)
+        )
+        self.timeline2.horizontalScrollBar().valueChanged.connect(
+            lambda value: self._follow_scroll(self.timeline, value)
+        )
         arrangement = QWidget()
         self.arrangement_layout = QVBoxLayout(arrangement)
         self.arrangement_layout.setContentsMargins(0, 0, 0, 0)
         self.arrangement_layout.setSpacing(0)
-        self.arrangement_layout.addWidget(self.splitter, 1)
+        self.arrangement_layout.addWidget(self.canvas_split, 1)
         self.setCentralWidget(arrangement)
 
     def _build_transport(self):
@@ -246,7 +293,7 @@ class MainWindow(QMainWindow):
         word.setObjectName("wordmark")
         bar.addWidget(word)
 
-        self.play_btn = self._tool_button(play_icon(), "Play", self._play, "playBtn")
+        self.play_btn = self._tool_button(play_icon(), "Play the canvas under the mouse (Space)", self._play_hovered, "playBtn")
         self.pause_btn = self._tool_button(pause_icon(), "Pause", self._pause)
         self.stop_btn = self._tool_button(stop_icon(), "Stop", self._stop)
         self.return_btn = self._tool_button(
@@ -309,16 +356,16 @@ class MainWindow(QMainWindow):
         bar.addWidget(spacer)
 
         zoom_out = self._text_button(
-            "−", "Zoom out", lambda: self.timeline.zoom_horizontal(1 / 1.1)
+            "−", "Zoom out", lambda: self._each_timeline(lambda view: view.zoom_horizontal(1 / 1.1))
         )
         zoom_in = self._text_button(
-            "+", "Zoom in", lambda: self.timeline.zoom_horizontal(1.1)
+            "+", "Zoom in", lambda: self._each_timeline(lambda view: view.zoom_horizontal(1.1))
         )
         lanes_out = self._text_button(
-            "▴", "Shorter tracks", lambda: self.timeline.zoom_vertical(1 / 1.08)
+            "▴", "Shorter tracks", lambda: self._each_timeline(lambda view: view.zoom_vertical(1 / 1.08))
         )
         lanes_in = self._text_button(
-            "▾", "Taller tracks", lambda: self.timeline.zoom_vertical(1.08)
+            "▾", "Taller tracks", lambda: self._each_timeline(lambda view: view.zoom_vertical(1.08))
         )
         for button in (zoom_out, zoom_in, lanes_out, lanes_in):
             bar.addWidget(button)
@@ -506,43 +553,63 @@ class MainWindow(QMainWindow):
         self.beats_action.setCheckable(True)
         self.beats_action.setChecked(True)
         self.beats_action.setToolTip("Show beats detected in the imported audio")
-        self.beats_action.toggled.connect(self.timeline.set_show_beats)
+        self.beats_action.toggled.connect(lambda on: self._each_timeline(lambda view: view.set_show_beats(on)))
         view_menu.addAction(self.beats_action)
         self.detected_action = QAction("Downbeats", self)
         self.detected_action.setCheckable(True)
         self.detected_action.setChecked(True)
         self.detected_action.setToolTip("Show downbeats detected in the audio")
-        self.detected_action.toggled.connect(self.timeline.set_show_detected)
+        self.detected_action.toggled.connect(lambda on: self._each_timeline(lambda view: view.set_show_detected(on)))
         view_menu.addAction(self.detected_action)
         self.onsets_action = QAction("Onsets", self)
         self.onsets_action.setCheckable(True)
         self.onsets_action.setChecked(True)
         self.onsets_action.setToolTip("Show onset timing against the beat reference")
-        self.onsets_action.toggled.connect(self.timeline.set_show_onsets)
+        self.onsets_action.toggled.connect(lambda on: self._each_timeline(lambda view: view.set_show_onsets(on)))
         view_menu.addAction(self.onsets_action)
+        view_menu.addSeparator()
+        self.second_canvas_action = QAction("Second Canvas", self)
+        self.second_canvas_action.setCheckable(True)
+        self.second_canvas_action.setShortcut(QKeySequence("Ctrl+Shift+2"))
+        self.second_canvas_action.setToolTip("A second arrangement beside the first; it plays with the song")
+        self.second_canvas_action.toggled.connect(self._toggle_second_canvas)
+        view_menu.addAction(self.second_canvas_action)
+        layout_menu = view_menu.addMenu("Canvas Layout")
+        group = QActionGroup(self)
+        self.canvas_stacked_action = QAction("Stacked (Second Canvas Below)", self, checkable=True)
+        self.canvas_side_action = QAction("Side by Side (Second Canvas Right)", self, checkable=True)
+        for action, side in ((self.canvas_stacked_action, False), (self.canvas_side_action, True)):
+            group.addAction(action)
+            layout_menu.addAction(action)
+            action.triggered.connect(lambda _checked=False, side=side: self._set_canvas_layout(side))
+        self.canvas_stacked_action.setChecked(True)
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            stored = QSettings("SonicLab", "SonicLab").value("view/canvasSideBySide", False)
+            if str(stored).lower() in ("true", "1"):
+                self._set_canvas_layout(True)
         self._action(
             view_menu,
             "Zoom In",
-            lambda: self.timeline.zoom_horizontal(1.1),
+            lambda: self._each_timeline(lambda view: view.zoom_horizontal(1.1)),
             QKeySequence.StandardKey.ZoomIn,
         )
         self._action(
             view_menu,
             "Zoom Out",
-            lambda: self.timeline.zoom_horizontal(1 / 1.1),
+            lambda: self._each_timeline(lambda view: view.zoom_horizontal(1 / 1.1)),
             QKeySequence.StandardKey.ZoomOut,
         )
         self._action(
-            view_menu, "Reset Zoom", self.timeline.reset_zoom, QKeySequence("Ctrl+0")
+            view_menu, "Reset Zoom", lambda: self._each_timeline(lambda view: view.reset_zoom()), QKeySequence("Ctrl+0")
         )
         view_menu.addSeparator()
         self._action(
-            view_menu, "Taller Tracks", lambda: self.timeline.zoom_vertical(1.08)
+            view_menu, "Taller Tracks", lambda: self._each_timeline(lambda view: view.zoom_vertical(1.08))
         )
         self._action(
-            view_menu, "Shorter Tracks", lambda: self.timeline.zoom_vertical(1 / 1.08)
+            view_menu, "Shorter Tracks", lambda: self._each_timeline(lambda view: view.zoom_vertical(1 / 1.08))
         )
-        self._action(view_menu, "Reset Track Height", self.timeline.reset_track_heights)
+        self._action(view_menu, "Reset Track Height", lambda: self._each_timeline(lambda view: view.reset_track_heights()))
 
         track_menu = self.menuBar().addMenu("&Track")
         self._action(
@@ -565,6 +632,9 @@ class MainWindow(QMainWindow):
         )
         self.move_down_action = self._action(
             track_menu, "Move Down", lambda: self._move_track(1)
+        )
+        self.canvas_move_action = self._action(
+            track_menu, "Move to Other Canvas", self._move_selected_to_other_canvas, QKeySequence("Ctrl+Shift+M")
         )
 
         clip_menu = self.menuBar().addMenu("&Clip")
@@ -617,7 +687,8 @@ class MainWindow(QMainWindow):
         clip_menu.aboutToShow.connect(self._sync_clip_actions)
 
         audio_menu = self.menuBar().addMenu("&Audio")
-        self._action(audio_menu, "Play", self._play)
+        self._action(audio_menu, "Play", self._play_hovered)
+        self.play_both_action = self._action(audio_menu, "Play Both Canvases", lambda: self._play())
         self._action(audio_menu, "Pause", self._pause)
         self._action(audio_menu, "Stop", self._stop)
         self._action(audio_menu, "Return to Start", self._return_to_start)
@@ -659,6 +730,7 @@ class MainWindow(QMainWindow):
         self._action(
             bars_menu, "Mark Bars at Drum Downbeats", self._mark_bars_from_drums
         )
+        self._action(bars_menu, "Even Bars at the BPM Tempo", self._even_bars_at_tempo)
         self._action(bars_menu, "Reset Bars", self._reset_bars)
         bars_menu.addSeparator()
         bars_menu.addAction(self.export_bars_action)
@@ -693,38 +765,67 @@ class MainWindow(QMainWindow):
         return action
 
     def _connect(self):
-        self.bpm.valueChanged.connect(self._update_grid)
+        self.bpm.valueChanged.connect(self._bpm_changed)
+        self._tempo_timer = QTimer(self)
+        self._tempo_timer.setSingleShot(True)
+        self._tempo_timer.setInterval(700)
+        self._tempo_timer.timeout.connect(self._apply_typed_tempo)
         self.bpm.editingFinished.connect(self._commit_edit)
         self.signature.currentTextChanged.connect(self._signature_changed)
-        self.timeline.on_trim = self._trim_clip
-        self.timeline.on_release = self._clip_released
-        self.timeline.seek_requested.connect(self.engine.seek)
-        self.timeline.track_selected.connect(self._on_track_selected)
-        self.timeline.layout_changed.connect(self._rebuild_side_panels)
-        self.timeline.bars_changed.connect(
-            lambda lines: self._set_bars(lines, "Bar line moved")
-        )
-        self.timeline.bar_edit_requested.connect(self._edit_bar)
-        self.timeline.bars_selected.connect(self._select_bars)
-        self.timeline.viewport().setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu
-        )
-        self.timeline.viewport().customContextMenuRequested.connect(
-            self._clip_context_menu
-        )
-        self.timeline.verticalScrollBar().valueChanged.connect(self._sync_from_timeline)
-        self.headers.scroll.verticalScrollBar().valueChanged.connect(
-            self._sync_from_headers
-        )
-        self.headers.selected.connect(self._select_track)
-        self.headers.gain_changed.connect(self._set_gain)
-        self.headers.pan_changed.connect(self._set_pan)
-        self.headers.mute_changed.connect(self._set_muted)
-        self.headers.solo_changed.connect(self._set_solo)
-        self.headers.arm_changed.connect(self._set_armed)
-        self.headers.edit_finished.connect(self._commit_edit)
-        self.headers.resize_committed.connect(self._on_track_resized)
-        self.headers.unavailable.connect(self._unavailable)
+        for headers, timeline in self._canvases():
+            timeline.on_trim = self._trim_clip
+            timeline.on_release = self._clip_released
+            timeline.on_block_move = self._move_block
+            timeline.seek_requested.connect(
+                lambda seconds, canvas=timeline.canvas: self._seek_on_canvas(canvas, seconds)
+            )
+            timeline.track_selected.connect(lambda index, view=timeline: self._on_view_selected(view, index))
+            timeline.layout_changed.connect(self._rebuild_side_panels)
+            timeline.bars_changed.connect(
+                lambda lines: self._set_bars(lines, "Bar line moved")
+            )
+            timeline.bar_edit_requested.connect(self._edit_bar)
+            timeline.bars_selected.connect(self._select_bars)
+            timeline.bar_play_requested.connect(self._play_bar)
+            timeline.downbeat_clicked.connect(self._show_bar_menu)
+            timeline.rename_requested.connect(self._rename_track_at)
+            timeline.canvas_move_requested.connect(self._move_track_to_canvas)
+            timeline.blocks_move_requested.connect(
+                lambda blocks, grabbed, shift, canvas, row, view=timeline: self._move_blocks(
+                    view, blocks, grabbed, shift, canvas, row
+                )
+            )
+            timeline.canvas_drop_requested.connect(
+                lambda indices, grabbed, shift, row, view=timeline: self._drop_on_canvas(
+                    view, indices, grabbed, shift, row
+                )
+            )
+            timeline.row_move_requested.connect(
+                lambda index, row, view=timeline: self._move_track_to_row(index, view, row)
+            )
+            timeline.viewport().setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            timeline.viewport().customContextMenuRequested.connect(
+                lambda pos, view=timeline: self._clip_context_menu(pos, view)
+            )
+            timeline.verticalScrollBar().valueChanged.connect(
+                lambda value, pair=(headers, timeline): self._sync_from_timeline(value, pair)
+            )
+            headers.scroll.verticalScrollBar().valueChanged.connect(
+                lambda value, pair=(headers, timeline): self._sync_from_headers(value, pair)
+            )
+            headers.selected.connect(self._select_track)
+            headers.gain_changed.connect(self._set_gain)
+            headers.pan_changed.connect(self._set_pan)
+            headers.mute_changed.connect(self._set_muted)
+            headers.solo_changed.connect(self._set_solo)
+            headers.arm_changed.connect(self._set_armed)
+            headers.edit_finished.connect(self._commit_edit)
+            headers.resize_committed.connect(self._on_track_resized)
+            headers.unavailable.connect(self._unavailable)
+            headers.rename_requested.connect(self._rename_track_at)
+            headers.play_requested.connect(lambda canvas=timeline.canvas: self._play_canvas(canvas))
         self.mixer.selected.connect(self._select_track)
         self.mixer.gain_changed.connect(self._set_gain)
         self.mixer.pan_changed.connect(self._set_pan)
@@ -770,6 +871,11 @@ class MainWindow(QMainWindow):
             QEvent.Type.Drop,
         ):
             return self._handle_drop_event(watched, event_type, event)
+        if event_type == QEvent.Type.Enter and isinstance(watched, QWidget):
+            if watched is self.splitter2 or self.splitter2.isAncestorOf(watched):
+                self._hover_canvas = 1
+            elif watched is self.splitter or self.splitter.isAncestorOf(watched):
+                self._hover_canvas = 0
         if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
             if QApplication.activeModalWidget() is not None:
                 return False
@@ -863,7 +969,17 @@ class MainWindow(QMainWindow):
         if self.engine.playing:
             self._pause()
         else:
+            self._play_hovered()
+
+    def _play_hovered(self) -> None:
+        """Play the canvas the mouse is (or was last) over, from its own
+        playhead. With one canvas this is plain Play."""
+        if not self.splitter2.isVisible():
             self._play()
+            return
+        if self.engine.playing and self._canvas_focus == self._hover_canvas:
+            return
+        self._play_canvas(self._hover_canvas)
 
     def _unavailable(self, message: str):
         self.statusBar().showMessage(message, 4000)
@@ -1110,26 +1226,74 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._import_paths(paths))
         return True
 
+    def _canvases(self):
+        """(header column, timeline view) of each canvas, main first."""
+        return ((self.headers, self.timeline), (self.headers2, self.timeline2))
+
+    def _timelines(self):
+        return (self.timeline, self.timeline2)
+
+    def _view_for(self, index: int) -> TimelineView:
+        """The timeline view that draws track ``index``."""
+        tracks = self.project.tracks
+        if 0 <= index < len(tracks) and track_canvas(tracks[index]) == 1:
+            return self.timeline2
+        return self.timeline
+
+    def _header_heights(self, tracks, timeline=None) -> list[int]:
+        timeline = timeline or self.timeline
+        rows, primaries = timeline.lane_rows(tracks)
+        heights = []
+        for index in range(len(tracks)):
+            if rows[index] >= 0 and primaries[rows[index]] == index:
+                heights.append(timeline.row_height(index))
+            else:
+                heights.append(0)
+        return heights
+
+    def _lane_primary(self, index: int) -> int:
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return index
+        rows, primaries = self._view_for(index).lane_rows(tracks)
+        if not primaries or rows[index] < 0:
+            return index
+        return primaries[rows[index]]
+
     def _refresh_timeline(self):
         bpm = float(self.bpm.value())
         time_signature = self.signature.currentText()
         numerator, denominator = parse_time_signature(time_signature)
         self.project.bpm = bpm
         self.project.time_signature = [numerator, denominator]
-        self.timeline.rebuild(
-            self.project.tracks,
-            self._clip_moved,
-            bpm,
-            time_signature,
-            self._bar_lines(),
-        )
+        bars = self._bar_lines()
+        if any(track_canvas(track) == 1 for track in self.project.tracks):
+            self.splitter2.setVisible(True)
+            self.second_canvas_action.blockSignals(True)
+            self.second_canvas_action.setChecked(True)
+            self.second_canvas_action.blockSignals(False)
+        for timeline in self._timelines():
+            timeline.rebuild(
+                self.project.tracks,
+                self._clip_moved,
+                bpm,
+                time_signature,
+                bars,
+            )
+        if (
+            self.splitter2.isVisible()
+            and not self.canvas_side_by_side
+            and self._second_canvas_rows() != self._sized_rows
+        ):
+            self._size_canvases()  # rows came or went: fit the second canvas again
+        self._sync_bpm_field()
 
     def _rebuild_side_panels(self):
         tracks = self.project.tracks
-        heights = [self.timeline.row_height(index) for index in range(len(tracks))]
-        self.headers.rebuild(tracks, heights, self._selected)
-        self.headers.set_scene_height(self.timeline.scene_obj.sceneRect().height())
-        self.headers.sync(self.timeline.verticalScrollBar().value())
+        for headers, timeline in self._canvases():
+            headers.rebuild(tracks, self._header_heights(tracks, timeline), self._selected)
+            headers.set_scene_height(timeline.scene_obj.sceneRect().height())
+            headers.sync(timeline.verticalScrollBar().value())
         self.mixer.rebuild(tracks, self._selected)
         self.visualizer.set_sources([track.get("name", "Track") for track in tracks])
         self._refresh_browser()
@@ -1179,8 +1343,7 @@ class MainWindow(QMainWindow):
     def _push_mix(self, index, track):
         self.engine.set_clip_gain(index, float(track.get("gain", 1.0)))
         self.engine.set_clip_pan(index, float(track.get("pan", 0.0)))
-        self.engine.set_clip_muted(index, bool(track.get("muted", False)))
-        self.engine.set_clip_solo(index, bool(track.get("solo", False)))
+        self._push_audible(index, track)
         duration = float(track.get("duration", 0.0) or 0.0)
         self.engine.set_clip_region(
             index,
@@ -1191,6 +1354,51 @@ class MainWindow(QMainWindow):
             float(track.get("fade_out", 0.0) or 0.0),
             float(track.get("clip_gain", 1.0) or 1.0),
         )
+
+    def _push_audible(self, index, track) -> None:
+        """Mute and solo for the engine. While one canvas plays on its own,
+        the other canvas's tracks are silent and their solos ignored; the
+        tracks' own mute and solo settings are not changed."""
+        outside = self._canvas_focus is not None and track_canvas(track) != self._canvas_focus
+        self.engine.set_clip_muted(index, bool(track.get("muted", False)) or outside)
+        self.engine.set_clip_solo(index, bool(track.get("solo", False)) and not outside)
+
+    def _set_canvas_focus(self, canvas: int | None) -> None:
+        """Hear one canvas only (0 or 1), or both (None)."""
+        self._canvas_focus = canvas
+        for index, track in enumerate(self.project.tracks):
+            self._push_audible(index, track)
+        self._sync_canvas_play_buttons()
+
+    def _seek_on_canvas(self, canvas: int, seconds: float) -> None:
+        """A click on one canvas's ruler moves that canvas's playhead."""
+        self._canvas_positions[canvas] = max(0.0, float(seconds))
+        self._active_canvas = canvas
+        self.engine.seek(seconds)
+
+    def _play_canvas(self, canvas: int) -> None:
+        """The ▶ in a canvas's corner: play that canvas alone, or stop it."""
+        if self.engine.playing and self._canvas_focus == canvas:
+            self._pause()
+            return
+        if canvas == 1 and not self.splitter2.isVisible():
+            return
+        if self.engine.playing:
+            # Switching canvases while playing: keep the current position.
+            self._canvas_positions[canvas] = float(self.engine.position)
+        else:
+            self.engine.seek(self._canvas_positions[canvas])  # start where its playhead rests
+        self._active_canvas = canvas
+        self._set_canvas_focus(canvas)
+        if not self.engine.playing:
+            self._play(keep_focus=True)
+        name = "the main canvas" if canvas == 0 else "canvas 2"
+        self.statusBar().showMessage(f"Playing {name} only. ▶ in the toolbar plays both", 4000)
+
+    def _sync_canvas_play_buttons(self) -> None:
+        playing = self.engine.playing
+        self.headers.set_playing(playing and self._canvas_focus == 0)
+        self.headers2.set_playing(playing and self._canvas_focus == 1)
 
     def _reload_engine(self):
         self.engine.clear_clips()
@@ -1231,6 +1439,7 @@ class MainWindow(QMainWindow):
         playing = self.engine.playing
         if playing == self._playing_shown:
             return
+        self._sync_canvas_play_buttons()  # playback can also end by itself
         self._playing_shown = playing
         self.play_btn.setProperty("playing", playing)
         self.play_btn.setIcon(play_icon("#F4E7CC" if playing else "#E6E8EC"))
@@ -1244,7 +1453,19 @@ class MainWindow(QMainWindow):
         secs = seconds % 60
         self.position_label.setText(f"{minutes:02d}:{secs:06.3f}")
         self.musical_label.setText(self._musical_position(seconds))
-        self.timeline.set_playhead(seconds, follow=self.engine.playing)
+        playing = self.engine.playing
+        for timeline in self._timelines():
+            canvas = timeline.canvas
+            heard = self._canvas_focus is None or self._canvas_focus == canvas
+            if playing:
+                moving = heard
+            elif self._canvas_focus is not None:
+                moving = self._canvas_focus == canvas
+            else:
+                moving = canvas == self._active_canvas
+            if moving:
+                self._canvas_positions[canvas] = seconds
+            timeline.set_playhead(self._canvas_positions[canvas], follow=playing and heard)
         self._sync_transport_lamp()
         self._sync_capture()
         master, tracks = self.engine.take_peaks()
@@ -1256,7 +1477,9 @@ class MainWindow(QMainWindow):
         if self.engine.playing:
             self.stem_splitter.stop_preview()  # one sound source at a time
 
-    def _play(self):
+    def _play(self, keep_focus: bool = False):
+        if not keep_focus and self._canvas_focus is not None:
+            self._set_canvas_focus(None)  # the transport plays both canvases
         try:
             self.engine.play()
         except Exception as exc:
@@ -1268,10 +1491,12 @@ class MainWindow(QMainWindow):
     def _pause(self):
         self.engine.pause()
         self._sync_transport_lamp()
+        self._sync_canvas_play_buttons()
 
     def _stop(self):
         self.engine.stop()
         self._sync_transport_lamp()
+        self._sync_canvas_play_buttons()
 
     def _return_to_start(self):
         self.engine.seek(0.0)
@@ -1316,7 +1541,8 @@ class MainWindow(QMainWindow):
             if position < bounds[0] or position >= bounds[1]:
                 self.engine.seek(bounds[0])
         self._loop_bounds = (float(start), float(end))
-        self.timeline.set_loop_region(start, end)
+        for timeline in self._timelines():
+            timeline.set_loop_region(start, end)
         self._set_loop_button(True)
         if intervals is None:
             self.statusBar().showMessage("Loop on", 3000)
@@ -1327,14 +1553,16 @@ class MainWindow(QMainWindow):
     def _clear_loop(self) -> None:
         self.engine.clear_loop()
         self._loop_bounds = None
-        self.timeline.set_loop_region(None, None)
+        for timeline in self._timelines():
+            timeline.set_loop_region(None, None)
         self._set_loop_button(False)
         self.statusBar().showMessage("Loop off", 3000)
 
     def _toggle_loop(self) -> None:
         if self.engine.loop is not None:
             self.engine.clear_loop()
-            self.timeline.set_loop_region(None, None)
+            for timeline in self._timelines():
+                timeline.set_loop_region(None, None)
             self._set_loop_button(False)
             self.statusBar().showMessage("Loop off", 3000)
             return
@@ -1355,6 +1583,177 @@ class MainWindow(QMainWindow):
         self.loop_btn.style().polish(self.loop_btn)
         self.loop_btn.update()
 
+    # -- tempo ------------------------------------------------------------
+
+    @staticmethod
+    def _stretch_of(track) -> float:
+        """How much a track's audio is stretched in time from its file."""
+        try:
+            factor = float(track.get("stretch", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+        return factor if factor > 0 else 1.0
+
+    def _song_tempo(self) -> float | None:
+        """The song's tempo from its bar lines (placed or the drum
+        downbeats), or None when the bars are a plain tempo grid."""
+        lines = self._bar_lines()
+        if len(lines) < 2:
+            return None
+        lengths = np.diff(np.asarray(lines, dtype=float))
+        lengths = lengths[lengths > 0.05]
+        if lengths.size == 0:
+            return None
+        beats_per_bar, beat_unit = parse_time_signature(self.signature.currentText())
+        bar = float(np.median(lengths))
+        return 60.0 * beats_per_bar * (4.0 / beat_unit) / bar
+
+    def _sync_bpm_field(self) -> None:
+        """Show the song's tempo when its bars come from the music."""
+        tempo = self._song_tempo()
+        if tempo is None:
+            self.bpm.setToolTip("Tempo of the bar grid")
+            return
+        self.bpm.setToolTip(
+            "Tempo of the song, from its downbeats. Type a new tempo to speed up or slow "
+            "down every track without changing its pitch."
+        )
+        tempo = round(max(self.bpm.minimum(), min(self.bpm.maximum(), tempo)), 2)
+        if abs(self.bpm.value() - tempo) >= 0.005 and not self._tempo_timer.isActive():
+            self.bpm.blockSignals(True)
+            self.bpm.setValue(tempo)
+            self.bpm.blockSignals(False)
+            self._last_bpm = tempo
+
+    def _bpm_changed(self, value) -> None:
+        if self._song_tempo() is None:
+            self._update_grid(value)  # no music bars: the field is the grid tempo
+            return
+        # Bars follow the music: a new tempo stretches the song. Wait until
+        # typing or clicking the arrows stops.
+        self._tempo_timer.start()
+
+    def _apply_typed_tempo(self) -> None:
+        self.change_tempo(float(self.bpm.value()))
+
+    def change_tempo(self, new_bpm: float) -> bool:
+        """Speed up or slow down the whole song to ``new_bpm`` without
+        changing pitch. Every track is time-stretched; positions, bars and
+        beats scale with it. One undo step."""
+        old_bpm = self._song_tempo()
+        if old_bpm is None or new_bpm <= 0:
+            return False
+        ratio = old_bpm / float(new_bpm)  # time scale of this change
+        if abs(ratio - 1.0) < 1e-4:
+            self._sync_bpm_field()
+            return False
+        tracks = self.project.tracks
+        sources = [track.get("_source_audio", track.get("_audio")) for track in tracks]
+        factors = [self._stretch_of(track) * ratio for track in tracks]
+        work = [(source, factor) for source, factor in zip(sources, factors)]
+
+        def run(report):
+            out = []
+            for number, (source, factor) in enumerate(work):
+                if source is None or len(source) <= 1:
+                    out.append(source)
+                    continue
+                out.append(stretch_audio(source, factor, lambda part, n=number: report((n + part) / len(work))))
+            return out
+
+        was_playing = self.engine.playing
+        if was_playing:
+            self.engine.pause()
+        position = float(self.engine.position)
+        stretched = self._with_progress(f"Changing the tempo to {new_bpm:.2f} BPM…", run)
+        self._remember_edit()
+        for track, source, audio, factor in zip(tracks, sources, stretched, factors):
+            if source is not None:
+                track["_source_audio"] = source
+                track["_audio"] = audio
+            if abs(factor - 1.0) < 1e-6:
+                track.pop("stretch", None)
+            else:
+                track["stretch"] = round(factor, 9)
+            for key in ("start", "offset", "duration", "fade_in", "fade_out", "_alignment"):
+                if key in track and track[key] is not None:
+                    track[key] = float(track[key]) * ratio
+            if track.get("downbeats"):
+                track["downbeats"] = [[float(time) * ratio, position_] for time, position_ in track["downbeats"]]
+        if self.project.bars:
+            self.project.bars = [round(float(time) * ratio, 6) for time in self.project.bars]
+        if self._loop_bounds is not None:
+            start, end = self._loop_bounds
+            self._loop_bounds = (start * ratio, end * ratio)
+            if self.engine.loop is not None:
+                self._engage_loop(*self._loop_bounds)
+        self._canvas_positions = [value * ratio for value in self._canvas_positions]
+        self.bpm.blockSignals(True)
+        self.bpm.setValue(float(new_bpm))
+        self.bpm.blockSignals(False)
+        self._last_bpm = float(new_bpm)
+        self._reload_engine()
+        self.engine.seek(position * ratio)
+        self._commit_edit()
+        self._refresh_timeline()
+        if was_playing:
+            self._play(keep_focus=True)
+        self.statusBar().showMessage(
+            f"Tempo {old_bpm:.2f} → {new_bpm:.2f} BPM. Every track was stretched; pitch is unchanged", 6000
+        )
+        return True
+
+    def _even_bars_at_tempo(self) -> None:
+        """Replace the bar lines with an even grid at the BPM field's tempo,
+        starting at the first bar line. The audio is not changed."""
+        lines = self._bar_lines()
+        first = float(lines[0]) if lines else 0.0
+        beats_per_bar, beat_unit = parse_time_signature(self.signature.currentText())
+        bar = 60.0 * beats_per_bar * (4.0 / beat_unit) / max(1.0, float(self.bpm.value()))
+        end = max(
+            [float(t.get("start", 0.0) or 0.0) + float(t.get("duration", 0.0) or 0.0) for t in self.project.tracks]
+            + [first + bar]
+        )
+        count = int(np.ceil((end - first) / bar)) + 1
+        self._set_bars([first + bar * index for index in range(count)], f"Even bars at {self.bpm.value():.2f} BPM")
+
+    def _with_progress(self, label: str, work):
+        """Run ``work(report)`` on a worker thread while a progress dialog
+        keeps the window responsive. ``report(fraction)`` may be called from
+        the worker. Returns ``work``'s result or raises its exception."""
+        import threading
+
+        from PySide6.QtWidgets import QProgressDialog
+
+        state = {"fraction": 0.0, "done": False, "result": None, "error": None}
+
+        def report(fraction):
+            state["fraction"] = max(state["fraction"], min(1.0, float(fraction)))
+
+        def target():
+            try:
+                state["result"] = work(report)
+            except Exception as exc:  # shown to the caller
+                state["error"] = exc
+            finally:
+                state["done"] = True
+
+        dialog = QProgressDialog(label, None, 0, 1000, self)
+        dialog.setWindowTitle("SonicLab")
+        dialog.setMinimumDuration(400)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        worker = threading.Thread(target=target, name="soniclab-tempo", daemon=True)
+        worker.start()
+        while not state["done"]:
+            dialog.setValue(int(state["fraction"] * 1000))
+            QApplication.processEvents()
+            worker.join(0.02)
+        dialog.setValue(1000)
+        dialog.close()
+        if state["error"] is not None:
+            raise state["error"]
+        return state["result"]
+
     def _update_grid(self, value):
         first = self._gesture_before is None and not self._history_frozen
         self._remember_edit()
@@ -1369,7 +1768,26 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self.project.tracks):
             self._on_track_selected(-1)
             return
-        self.timeline.select_index(index)
+        view = self._view_for(index)
+        self._clear_selection(view.peer)
+        view.select_index(index)
+
+    @staticmethod
+    def _clear_selection(view) -> None:
+        """Deselect everything in ``view`` without reporting "no selection"."""
+        if view is None:
+            return
+        view.scene_obj.blockSignals(True)
+        view.scene_obj.clearSelection()
+        view.scene_obj.blockSignals(False)
+        view.viewport().update()
+
+    def _on_view_selected(self, view, index: int) -> None:
+        if index < 0 and view.peer is not None and view.peer.selected_indices():
+            return  # the selection moved to the other canvas
+        if index >= 0:
+            self._clear_selection(view.peer)
+        self._on_track_selected(index)
 
     def _on_track_selected(self, index: int):
         self._selected = index
@@ -1382,7 +1800,8 @@ class MainWindow(QMainWindow):
             self.inspector.show_track(index, self.project.tracks[index])
         else:
             self.inspector.show_track(-1, None)
-        self.headers.set_selected(index)
+        for headers in (self.headers, self.headers2):
+            headers.set_selected(self._lane_primary(index))
         self.mixer.set_selected(index)
 
     def _sync_clip_actions(self):
@@ -1426,7 +1845,7 @@ class MainWindow(QMainWindow):
         self.solo_action.blockSignals(False)
 
     def _clip_at_index(self, index):
-        for item in self.timeline.scene_obj.items():
+        for item in self._view_for(index).scene_obj.items():
             if isinstance(item, ClipItem) and item.clip_index == index:
                 return item
         return None
@@ -1443,7 +1862,8 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         self.project.tracks[index]["gain"] = gain
         self.engine.set_clip_gain(index, gain)
-        self.headers.set_gain(index, gain)
+        for headers in (self.headers, self.headers2):
+            headers.set_gain(index, gain)
         self.mixer.set_gain(index, gain)
         if index == self._selected:
             self.inspector.set_gain(gain)
@@ -1455,7 +1875,8 @@ class MainWindow(QMainWindow):
         pan = max(-1.0, min(1.0, float(pan)))
         self.project.tracks[index]["pan"] = pan
         self.engine.set_clip_pan(index, pan)
-        self.headers.set_pan(index, pan)
+        for headers in (self.headers, self.headers2):
+            headers.set_pan(index, pan)
         self.mixer.set_pan(index, pan)
         if index == self._selected:
             self.inspector.set_pan(pan)
@@ -1472,8 +1893,9 @@ class MainWindow(QMainWindow):
             return
         self._remember_edit()
         self.project.tracks[index]["muted"] = muted
-        self.engine.set_clip_muted(index, muted)
-        self.headers.set_muted(index, muted)
+        self._push_audible(index, self.project.tracks[index])
+        for headers in (self.headers, self.headers2):
+            headers.set_muted(index, muted)
         self.mixer.set_muted(index, muted)
         if index == self._selected:
             self.inspector.set_muted(muted)
@@ -1486,8 +1908,9 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         solo = bool(solo)
         self.project.tracks[index]["solo"] = solo
-        self.engine.set_clip_solo(index, solo)
-        self.headers.set_solo(index, solo)
+        self._push_audible(index, self.project.tracks[index])
+        for headers in (self.headers, self.headers2):
+            headers.set_solo(index, solo)
         self.mixer.set_solo(index, solo)
         if index == self._selected:
             self.inspector.set_solo(solo)
@@ -1575,31 +1998,394 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: self._apply_row_height(index, height))
 
     def _apply_row_height(self, index, height):
-        self.timeline.set_row_height(index, height)
+        for timeline in self._timelines():
+            timeline.set_row_height(index, height)
         self._refresh_timeline()
         if 0 <= index < len(self.project.tracks):
             self._select_track(index)
 
-    def _sync_from_timeline(self, value):
+    def _sync_from_timeline(self, value, pair=None):
         if self._scroll_lock:
             return
+        headers, _timeline = pair or (self.headers, self.timeline)
         self._scroll_lock = True
-        self.headers.sync(value)
+        headers.sync(value)
         self._scroll_lock = False
 
-    def _sync_from_headers(self, value):
+    def _sync_from_headers(self, value, pair=None):
         if self._scroll_lock:
             return
+        _headers, timeline = pair or (self.headers, self.timeline)
         self._scroll_lock = True
-        self.timeline.verticalScrollBar().setValue(value)
+        timeline.verticalScrollBar().setValue(value)
         self._scroll_lock = False
 
-    def _clip_context_menu(self, pos):
-        clip = self.timeline.clip_at(pos)
-        if clip is None:
+    def _each_timeline(self, action) -> None:
+        for timeline in self._timelines():
+            action(timeline)
+
+    def _selected_indices(self) -> list[int]:
+        """Selected tracks on both canvases."""
+        return sorted(set(self.timeline.selected_indices()) | set(self.timeline2.selected_indices()))
+
+    def _toggle_second_canvas(self, visible: bool) -> None:
+        if not visible and any(track_canvas(track) == 1 for track in self.project.tracks):
+            # Never hide tracks that are playing in the song.
+            self.second_canvas_action.blockSignals(True)
+            self.second_canvas_action.setChecked(True)
+            self.second_canvas_action.blockSignals(False)
+            self.statusBar().showMessage("Move the second canvas's tracks back before hiding it", 4000)
             return
-        self._select_track(clip.clip_index)
+        self.splitter2.setVisible(bool(visible))
+        if visible:
+            self._size_canvases()
+            self._refresh_timeline()
+
+    def _set_canvas_layout(self, side_by_side: bool) -> None:
+        """Second canvas below the main one, or to its right."""
+        side_by_side = bool(side_by_side)
+        self.canvas_side_by_side = side_by_side
+        self.canvas_split.setOrientation(
+            Qt.Orientation.Horizontal if side_by_side else Qt.Orientation.Vertical
+        )
+        (self.canvas_side_action if side_by_side else self.canvas_stacked_action).setChecked(True)
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            QSettings("SonicLab", "SonicLab").setValue("view/canvasSideBySide", side_by_side)
+        if not side_by_side:
+            # Stacked again: line the two time axes back up.
+            self._follow_scroll(self.timeline2, self.timeline.horizontalScrollBar().value())
+        if self.splitter2.isVisible():
+            self._size_canvases()
+            if side_by_side:
+                # Scrolling on its own now: start where its first clip is.
+                first = next(
+                    (i for i, track in enumerate(self.project.tracks) if track_canvas(track) == 1), None
+                )
+                if first is not None:
+                    self._reveal_track(first)
+        self.statusBar().showMessage(
+            "Canvases side by side" if side_by_side else "Canvases stacked", 2500
+        )
+
+    def _size_canvases(self) -> None:
+        """Side by side: half each, with narrow track headers. Stacked: the
+        second canvas is as tall as its rows, so it has no empty space."""
+        narrow = 150 if self.canvas_side_by_side else 208
+        for headers, splitter in ((self.headers, self.splitter), (self.headers2, self.splitter2)):
+            headers.setMinimumWidth(narrow)
+            total = max(2, splitter.width())
+            first = narrow if self.canvas_side_by_side else max(narrow, splitter.sizes()[0])
+            splitter.setSizes([first, max(1, total - first)])
+        if self.canvas_side_by_side:
+            total = max(2, self.canvas_split.width())
+            self.canvas_split.setSizes([total // 2, total - total // 2])
+        else:
+            total = max(2, self.canvas_split.height())
+            wanted = self._second_canvas_height()
+            self.canvas_split.setSizes([max(1, total - wanted), wanted])
+            self.splitter2.setSizes(self.splitter.sizes())
+        self._sized_rows = self._second_canvas_rows()
+
+    def _second_canvas_rows(self) -> int:
+        return len(self.timeline2.lane_rows(self.project.tracks)[1])
+
+    def _second_canvas_height(self) -> int:
+        """Ruler, rows, one empty row and the scroll bar of the second canvas;
+        never more than half the space."""
+        view = self.timeline2
+        _rows, primaries = view.lane_rows(self.project.tracks)
+        rows = view._display_top(len(primaries), primaries) if primaries else RULER_HEIGHT
+        # One empty row below the last: room to start a selection box and
+        # to drop clips onto a new row.
+        rows += TRACK_HEIGHT
+        scroll = view.horizontalScrollBar().sizeHint().height()
+        return int(min(max(view.minimumHeight(), rows + scroll + 8), self.canvas_split.height() // 2))
+
+    def _reveal_track(self, index: int) -> None:
+        """Scroll the canvas that holds track ``index`` until its clip shows."""
+        def reveal():
+            view = self._view_for(index)
+            for item in view.scene_obj.items():
+                if isinstance(item, ClipItem) and isValid(item) and item.clip_index == index:
+                    clip = item.sceneBoundingRect()
+                    shown = view.mapToScene(view.viewport().rect()).boundingRect()
+                    if shown.intersects(clip):
+                        return  # already on screen: leave the view alone
+                    # Bring its start into view (a long clip can be wider than the view).
+                    width = min(clip.width(), shown.width() / 2)
+                    view.ensureVisible(clip.x(), clip.y(), max(1.0, width), clip.height(), 40, 10)
+                    return
+        QTimer.singleShot(0, reveal)
+
+    def _follow_scroll(self, other, value: int) -> None:
+        """Keep the stacked canvases on the same stretch of time."""
+        if not self.canvas_side_by_side and other.horizontalScrollBar().value() != value:
+            other.horizontalScrollBar().setValue(value)
+
+    def _match_header_widths(self, source, other) -> None:
+        if not self.canvas_side_by_side:
+            other.setSizes(source.sizes())
+
+    def _move_track_to_canvas(self, index: int, canvas: int, start: float | None = None) -> None:
+        """Put a whole track (and any track sharing its row) on ``canvas``."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return
+        lane = tracks[index].get("lane")
+        group = [i for i, track in enumerate(tracks) if i == index or (lane is not None and track.get("lane") == lane)]
+        shift = 0.0 if start is None else max(0.0, float(start)) - float(tracks[index].get("start", 0.0) or 0.0)
+        self._remember_edit()
+        for i in group:
+            track = tracks[i]
+            if canvas:
+                track["canvas"] = int(canvas)
+            else:
+                track.pop("canvas", None)
+            track["start"] = max(0.0, float(track.get("start", 0.0) or 0.0) + shift)
+            self.engine.set_clip_start(i, track["start"])
+        self._commit_edit()
+        self._refresh_timeline()
+        self._select_track(index)
+        where = "the second canvas" if canvas else "the main canvas"
+        self.statusBar().showMessage(f"Moved “{tracks[index].get('name', 'Track')}” to {where}", 3000)
+        self._reveal_track(index)
+
+    def _move_track_to_row(self, index: int, view, display_row: int) -> None:
+        """Put one clip on another row of its canvas: it joins the clips on
+        that row, or gets a row of its own past the last one. Its time stays
+        where the drag left it. One undo step with the drag."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return
+        rows, primaries = view.lane_rows(tracks)
+        track = tracks[index]
+        self._remember_edit()
+        if 0 <= display_row < len(primaries):
+            new_index = self._join_row(track, tracks[primaries[display_row]])
+            where = f"row {display_row + 1}"
+        else:
+            track.pop("lane", None)
+            tracks.pop(index)
+            tracks.append(track)
+            new_index = len(tracks) - 1
+            where = "a new row"
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        self._select_track(new_index)
+        self.statusBar().showMessage(f"Moved “{track.get('name', 'Track')}” to {where}", 3000)
+
+    def _drop_on_canvas(self, source, indices, grabbed: int, shift: float, target_row: int) -> None:
+        """Clips dragged from ``source`` onto the other canvas. They move in
+        time by ``shift``; the grabbed clip lands on ``target_row`` there and
+        the others keep their rows relative to it. A row that exists there is
+        joined; past the last row (or above the first) new rows are made.
+        Only the dragged clips move, never the rest of their rows."""
+        target = source.peer
+        tracks = self.project.tracks
+        if target is None or not (0 <= grabbed < len(tracks)):
+            return
+        indices = [i for i in indices if 0 <= i < len(tracks)]
+        source_rows, _ = source.lane_rows(tracks)
+        _, target_primaries = target.lane_rows(tracks)
+        hosts = [tracks[i] for i in target_primaries]  # by object: indices change below
+        moving = [tracks[i] for i in indices]
+        rows = {id(track): source_rows[i] - source_rows[grabbed] + target_row for i, track in zip(indices, moving)}
+        canvas = target.canvas
+        if canvas == 1 and not self.splitter2.isVisible():
+            self._toggle_second_canvas(True)
+        self._remember_edit()
+        new_lanes: dict[int, int] = {}
+        for track in moving:
+            track["start"] = max(0.0, float(track.get("start", 0.0) or 0.0) + float(shift))
+            row = rows[id(track)]
+            if 0 <= row < len(hosts) and hosts[row] is not track:
+                self._join_row(track, hosts[row])
+                continue
+            # A new row: clips that land on the same new row share it.
+            if row not in new_lanes:
+                new_lanes[row] = self._lane_ids
+                self._lane_ids += 1
+            track["lane"] = new_lanes[row]
+            if canvas:
+                track["canvas"] = canvas
+            else:
+                track.pop("canvas", None)
+            tracks.pop(next(i for i, other in enumerate(tracks) if other is track))
+            tracks.append(track)
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        grabbed_track = moving[indices.index(grabbed)] if grabbed in indices else None
+        if grabbed_track is not None:
+            index = next(i for i, other in enumerate(tracks) if other is grabbed_track)
+            self._select_track(index)
+            self._reveal_track(index)
+        where = "the second canvas" if canvas else "the main canvas"
+        count = len(moving)
+        self.statusBar().showMessage(
+            f"Moved {count} clip{'s' if count != 1 else ''} to {where}", 3000
+        )
+
+    def _move_blocks(self, source, blocks, grabbed: int, shift: float, canvas: int, target_row: int) -> None:
+        """Picked bars dragged together. Each bar is cut out of its track as
+        a piece of its own (a piece that already is one bar just moves),
+        moved by ``shift`` seconds onto ``canvas``. The grabbed bar lands on
+        ``target_row`` there; the others keep their rows relative to it,
+        joining rows that exist and making new ones past the last. One undo."""
+        tracks = self.project.tracks
+        blocks = [b for b in blocks if 0 <= int(b[0]) < len(tracks)]
+        if not blocks or not (0 <= grabbed < len(blocks)):
+            return
+        target = source if source.canvas == canvas else source.peer
+        if target is None:
+            return
+        if canvas == 1 and not self.splitter2.isVisible():
+            self._toggle_second_canvas(True)
+        source_rows, _ = source.lane_rows(tracks)
+        _, target_primaries = target.lane_rows(tracks)
+        hosts = [tracks[i] for i in target_primaries]
+        base = source_rows[int(blocks[grabbed][0])]
+        grouped: dict[int, list] = {}
+        for index, local_start, local_duration, bar in blocks:
+            grouped.setdefault(int(index), []).append((float(local_start), float(local_duration), int(bar)))
+        self._remember_edit()
+        pieces = []  # (piece, relative row)
+        replaced = {}  # id(track) -> remaining segments
+        for index, items in grouped.items():
+            track = tracks[index]
+            relative = source_rows[index] - base
+            start = float(track.get("start", 0.0) or 0.0)
+            offset = float(track.get("offset", 0.0) or 0.0)
+            duration = float(track.get("duration", 0.0) or 0.0)
+            items.sort()
+            if len(items) == 1 and items[0][0] <= 0.05 and items[0][1] >= duration - 0.05:
+                pieces.append((track, relative, True))  # the whole clip is this bar
+                continue
+            for local_start, local_duration, bar in items:
+                piece = dict(track)
+                piece["start"] = start + local_start
+                piece["offset"] = offset + local_start
+                piece["duration"] = local_duration
+                piece["armed"] = False
+                piece["bar_block"] = True
+                piece["name"] = f"{track.get('name', 'Audio')} · bar {bar + 1}"
+                piece.pop("lane", None)
+                pieces.append((piece, relative, False))
+            # What is left of the track around the bars taken out.
+            segments = []
+            cursor = 0.0
+            for local_start, local_duration, _bar in items:
+                if local_start - cursor >= 0.05:
+                    segments.append((cursor, local_start - cursor))
+                cursor = max(cursor, local_start + local_duration)
+            if duration - cursor >= 0.05:
+                segments.append((cursor, duration - cursor))
+            replaced[id(track)] = (track, segments, start, offset)
+        # Rebuild the track list with the remaining segments in place.
+        rebuilt = []
+        for track in tracks:
+            entry = replaced.get(id(track))
+            if entry is None:
+                rebuilt.append(track)
+                continue
+            track, segments, start, offset = entry
+            if not segments:
+                continue  # every bar of it was taken
+            lane = track.get("lane")
+            if len(segments) > 1 and lane is None:
+                lane = self._lane_ids
+                self._lane_ids += 1
+            for number, (local_start, length) in enumerate(segments):
+                part = track if number == 0 else dict(track)
+                part["start"] = start + local_start
+                part["offset"] = offset + local_start
+                part["duration"] = length
+                if lane is not None:
+                    part["lane"] = lane
+                if number:
+                    part["armed"] = False
+                rebuilt.append(part)
+        tracks[:] = rebuilt
+        new_lanes: dict[int, int] = {}
+        moved = []
+        for piece, relative, whole in pieces:
+            piece["start"] = max(0.0, float(piece["start"]) + float(shift))
+            if not whole:
+                tracks.append(piece)
+            row = target_row + relative
+            if 0 <= row < len(hosts) and hosts[row] is not piece and any(h is hosts[row] for h in tracks):
+                self._join_row(piece, hosts[row])
+            else:
+                if row not in new_lanes:
+                    new_lanes[row] = self._lane_ids
+                    self._lane_ids += 1
+                piece["lane"] = new_lanes[row]
+                if canvas:
+                    piece["canvas"] = canvas
+                else:
+                    piece.pop("canvas", None)
+                tracks.pop(next(i for i, other in enumerate(tracks) if other is piece))
+                tracks.append(piece)
+            moved.append(piece)
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        indices = {next(i for i, other in enumerate(tracks) if other is piece) for piece in moved}
+        for view in self._timelines():
+            view.set_picks({})
+        target.pick_whole_clips(indices)
+        first = min(indices)
+        self._select_track(first)
+        self._reveal_track(first)
+        count = len(moved)
+        where = "canvas 2" if canvas else "the main canvas"
+        self.statusBar().showMessage(f"Moved {count} bar{'s' if count != 1 else ''} on {where}", 3000)
+
+    def _join_row(self, track: dict, host: dict) -> int:
+        """Put ``track`` on ``host``'s row (they share a lane), just after the
+        row's last clip so the row keeps its place. Returns its new index."""
+        tracks = self.project.tracks
+        lane = host.get("lane")
+        if lane is None:
+            lane = self._lane_ids
+            self._lane_ids += 1
+            host["lane"] = lane
+        track["lane"] = lane
+        if track_canvas(host):
+            track["canvas"] = track_canvas(host)
+        else:
+            track.pop("canvas", None)
+        # By identity: track dicts hold numpy arrays, so == would not work.
+        tracks.pop(next(i for i, other in enumerate(tracks) if other is track))
+        members = [i for i, other in enumerate(tracks) if other.get("lane") == lane]
+        new_index = (members[-1] + 1) if members else len(tracks)
+        tracks.insert(new_index, track)
+        return new_index
+
+    def _move_selected_to_other_canvas(self) -> None:
+        index = self._selected
+        if not (0 <= index < len(self.project.tracks)):
+            return
+        target = 0 if track_canvas(self.project.tracks[index]) == 1 else 1
+        if target == 1:
+            self._toggle_second_canvas(True)
+        self._move_track_to_canvas(index, target)
+
+    def _clip_context_menu(self, pos, view=None):
+        view = view or self.timeline
+        bar = view.bar_under(pos)
+        clip = view.clip_at(pos)
         menu = QMenu(self)
+        if bar >= 0:
+            self._add_bar_actions(menu, bar)
+        if clip is None:
+            if menu.actions():
+                menu.exec(view.viewport().mapToGlobal(pos))
+            return
+        if menu.actions():
+            menu.addSeparator()
+        self._select_track(clip.clip_index)
         menu.addAction(self.rename_action)
         menu.addAction(self.move_start_action)
         menu.addAction(self.mute_action)
@@ -1613,11 +2399,12 @@ class MainWindow(QMainWindow):
         menu.addAction(self.nudge_action)
         self._sync_clip_actions()
         menu.addMenu(self.downbeat_menu)
+        menu.addAction(self.canvas_move_action)
         menu.addAction(self.move_up_action)
         menu.addAction(self.move_down_action)
         menu.addSeparator()
         menu.addAction(self.delete_action)
-        menu.exec(self.timeline.viewport().mapToGlobal(pos))
+        menu.exec(view.viewport().mapToGlobal(pos))
 
     def _new_project(self):
         if self.project.tracks:
@@ -1635,9 +2422,10 @@ class MainWindow(QMainWindow):
         self.project = Project()
         self.current_path = None
         self._selected = -1
-        self.timeline.pixels_per_second = float(PIXELS_PER_SECOND)
-        self.timeline.track_height = TRACK_HEIGHT
-        self.timeline._row_heights = []
+        for timeline in self._timelines():
+            timeline.pixels_per_second = float(PIXELS_PER_SECOND)
+            timeline.track_height = TRACK_HEIGHT
+            timeline._row_heights = []
         self.bpm.blockSignals(True)
         self.signature.blockSignals(True)
         self.bpm.setValue(120)
@@ -1720,6 +2508,14 @@ class MainWindow(QMainWindow):
                     audio = AudioEngine.resample(audio, sr)
                 else:
                     audio = np.zeros((1, 2), dtype=np.float32)
+                factor = self._stretch_of(track)
+                if factor != 1.0 and len(audio) > 1:
+                    # Saved at another tempo than the file's: stretch it again.
+                    track["_source_audio"] = audio
+                    audio = self._with_progress(
+                        f"Setting the tempo of “{track.get('name', 'Track')}”…",
+                        lambda report, audio=audio, factor=factor: stretch_audio(audio, factor, report),
+                    )
                 track["_audio"] = audio
                 if len(audio) > 1:
                     file_duration = len(audio) / OUTPUT_RATE
@@ -1798,7 +2594,7 @@ class MainWindow(QMainWindow):
     def _selection(self) -> list[int]:
         indices = [
             index
-            for index in self.timeline.selected_indices()
+            for index in self._selected_indices()
             if 0 <= index < len(self.project.tracks)
         ]
         if indices:
@@ -1846,6 +2642,10 @@ class MainWindow(QMainWindow):
             "empty",
             "downbeats",
             "drum_reference",
+            "lane",
+            "canvas",
+            "bar_block",
+            "stretch",
         )
         for left, right in zip(before["tracks"], after["tracks"]):
             for key in keys:
@@ -1929,7 +2729,8 @@ class MainWindow(QMainWindow):
         self._commit_edit()
 
     def _set_snap(self, checked: bool) -> None:
-        self.timeline.set_snap(bool(checked))
+        for timeline in self._timelines():
+            timeline.set_snap(bool(checked))
         self.statusBar().showMessage("Snap beat" if checked else "Snap off", 2000)
 
     def _clip_released(self, index: int) -> None:
@@ -1941,7 +2742,7 @@ class MainWindow(QMainWindow):
                     old_tracks[index].get("start", 0.0)
                 )
                 others = [
-                    item for item in self.timeline.selected_indices() if item != index
+                    item for item in self._selected_indices() if item != index
                 ]
                 if abs(delta) > 1e-6 and others:
                     for other in others:
@@ -1981,6 +2782,121 @@ class MainWindow(QMainWindow):
         self._commit_edit()
         self._refresh_timeline()
         self._select_track(index)
+
+    def _move_block(
+        self,
+        index: int,
+        local_start: float,
+        local_duration: float,
+        new_start: float,
+        share_lane: bool,
+        insert_at: int,
+        bar: int,
+        canvas: int | None = None,
+        join: bool = False,
+    ) -> None:
+        """Move one bar of a track. The other bars stay where they are.
+
+        ``canvas`` is set when the bar was dropped on the other canvas.
+        ``join``: it was dropped on another track's row, and joins that row
+        (``insert_at`` is the row's first track).
+        """
+        host = (
+            self.project.tracks[insert_at]
+            if join and 0 <= insert_at < len(self.project.tracks) and insert_at != index
+            else None
+        )
+        if not (0 <= index < len(self.project.tracks)):
+            return
+        track = self.project.tracks[index]
+        start = float(track.get("start", 0.0))
+        duration = float(track.get("duration", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        local_start = max(0.0, min(float(local_start), duration))
+        local_end = max(local_start, min(local_start + float(local_duration), duration))
+        if local_end - local_start < 0.05 or duration <= 0:
+            return
+        self._remember_edit()
+        if local_end - local_start >= duration - 0.05:
+            track["start"] = max(0.0, float(new_start))
+            if canvas is not None:
+                if canvas:
+                    track["canvas"] = int(canvas)
+                else:
+                    track.pop("canvas", None)
+                track.pop("lane", None)
+            self.engine.set_clip_start(index, track["start"])
+            self._commit_edit()
+            self._refresh_timeline()
+            self._select_track(index)
+            return
+        piece = dict(track)
+        piece["start"] = max(0.0, float(new_start))
+        piece["offset"] = offset + local_start
+        piece["duration"] = local_end - local_start
+        piece["armed"] = False
+        # One block from now on, wherever it lands; see TimelineView._place_bar_blocks.
+        piece["bar_block"] = True
+        if canvas is not None:
+            if canvas:
+                piece["canvas"] = int(canvas)
+            else:
+                piece.pop("canvas", None)
+        piece["name"] = f"{track.get('name', 'Audio')} · bar {int(bar) + 1}"
+        head = local_start
+        tail_length = duration - local_end
+        tail = None
+        if head >= 0.05 and tail_length >= 0.05:
+            track["duration"] = head
+            tail = dict(track)
+            tail["start"] = start + local_end
+            tail["offset"] = offset + local_end
+            tail["duration"] = tail_length
+            tail["armed"] = False
+        elif head < 0.05:
+            track["start"] = start + local_end
+            track["offset"] = offset + local_end
+            track["duration"] = tail_length
+        else:
+            track["duration"] = head
+        lane = track.get("lane")
+        if share_lane or tail is not None:
+            if lane is None:
+                lane = self._lane_ids
+                self._lane_ids += 1
+                track["lane"] = lane
+            if tail is not None:
+                tail["lane"] = lane
+            if share_lane:
+                piece["lane"] = lane
+            else:
+                piece.pop("lane", None)
+        else:
+            piece.pop("lane", None)
+        if share_lane:
+            self.project.tracks.insert(index + 1, piece)
+            piece_index = index + 1
+            if tail is not None:
+                self.project.tracks.insert(index + 2, tail)
+        else:
+            if tail is not None:
+                self.project.tracks.insert(index + 1, tail)
+                if insert_at > index:
+                    insert_at += 1
+            insert_at = max(0, min(int(insert_at), len(self.project.tracks)))
+            if insert_at == index:
+                insert_at = index + 1
+            self.project.tracks.insert(insert_at, piece)
+            piece_index = insert_at
+        if host is not None:
+            piece_index = self._join_row(piece, host)
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        self._select_track(piece_index)
+        self.statusBar().showMessage(f"Moved bar {int(bar) + 1}", 2000)
+        if canvas is not None:
+            self._reveal_track(piece_index)
 
     def _split_selected(self) -> None:
         index = self._selected
@@ -2319,7 +3235,10 @@ class MainWindow(QMainWindow):
             reference_track = tracks[reference]
             reference_events = self._track_events(reference_track)
         return classify_onsets(
-            self.onset_jobs.onsets_for(track.get("path")),
+            tuple(
+                float(time) * self._stretch_of(track) if isinstance(time, (int, float)) else time
+                for time in (self.onset_jobs.onsets_for(track.get("path")) or ())
+            ),
             reference_events,
             float(track.get("start", 0.0) or 0.0),
             float(track.get("offset", 0.0) or 0.0),
@@ -2332,7 +3251,7 @@ class MainWindow(QMainWindow):
 
     def _apply_onsets(self) -> None:
         visible = self.timeline.show_onsets
-        for item in self.timeline.scene_obj.items():
+        for item in [*self.timeline.scene_obj.items(), *self.timeline2.scene_obj.items()]:
             if not isinstance(item, ClipItem) or not isValid(item):
                 continue
             index = item.clip_index
@@ -2352,7 +3271,7 @@ class MainWindow(QMainWindow):
     def _apply_detected_beats(self) -> None:
         visible = self.timeline.show_detected
         tracks = self.project.tracks
-        for item in self.timeline.scene_obj.items():
+        for item in [*self.timeline.scene_obj.items(), *self.timeline2.scene_obj.items()]:
             if not isinstance(item, ClipItem) or not isValid(item):
                 continue
             index = item.clip_index
@@ -2369,7 +3288,12 @@ class MainWindow(QMainWindow):
         """Applied downbeats when the track has them, else Madmom's result."""
         if track.get("downbeats"):
             return track_events(track)
-        return track_events(track, self.beat_jobs.events_for(track.get("path")))
+        factor = self._stretch_of(track)
+        detected = self.beat_jobs.events_for(track.get("path"))
+        if factor != 1.0:
+            # Analysed in the file's own time; the clip plays stretched.
+            detected = tuple((float(time) * factor, position) for time, position in detected or ())
+        return track_events(track, detected)
 
     def _track_events(self, track: dict) -> tuple[tuple[float, int], ...]:
         """What a track shows and loops on.
@@ -2570,6 +3494,58 @@ class MainWindow(QMainWindow):
         follows = "the drum downbeats" if self._drum_bar_lines() else "the tempo"
         self._set_bars([], f"Bars follow {follows}")
 
+    def _bar_bounds(self, index: int) -> tuple[float, float] | None:
+        lines, fallback = self.timeline.bar_lines, self.timeline.bar_fallback
+        if not lines or index < 0:
+            return None
+        start, end = bar_span(lines, index, fallback)
+        if end <= start:
+            return None
+        return float(start), float(end)
+
+    def _play_bar(self, index: int) -> None:
+        bounds = self._bar_bounds(index)
+        if bounds is None:
+            return
+        start, end = bounds
+        self._engage_loop(start, end)
+        self.engine.seek(start)
+        self._play()
+        self.statusBar().showMessage(f"Playing bar {index + 1}", 4000)
+
+    def _loop_bar(self, index: int) -> None:
+        bounds = self._bar_bounds(index)
+        if bounds is None:
+            return
+        self._engage_loop(*bounds)
+        self.statusBar().showMessage(f"Looping bar {index + 1}", 4000)
+
+    def _export_one_bar(self, index: int) -> None:
+        bounds = self._bar_bounds(index)
+        if bounds is None:
+            return
+        self._engage_loop(*bounds)
+        self._export_bars(index, index)
+
+    def _add_bar_actions(self, menu: QMenu, index: int) -> None:
+        menu.addAction("Play this bar", lambda i=index: self._play_bar(i))
+        menu.addAction("Loop this bar", lambda i=index: self._loop_bar(i))
+        menu.addAction("Export this bar…", lambda i=index: self._export_one_bar(i))
+        menu.addAction("Edit bar…", lambda i=index: self._edit_bar(i))
+
+    def _show_bar_menu(self, index: int, pos) -> None:
+        if index < 0:
+            return
+        menu = QMenu(self)
+        self._add_bar_actions(menu, index)
+        menu.exec(pos)
+
+    def _rename_track_at(self, index: int) -> None:
+        if not (0 <= index < len(self.project.tracks)):
+            return
+        self._select_track(index)
+        self._rename_track()
+
     def _select_bars(self, first: int, last: int) -> None:
         """Loop whole bars, which is also the range Export Bars offers."""
         lines, fallback = self.timeline.bar_lines, self.timeline.bar_fallback
@@ -2763,7 +3739,7 @@ class MainWindow(QMainWindow):
     def _downbeat_targets(self, source: int) -> list[int] | None:
         """Ask which tracks receive the source downbeats. None means cancelled."""
         tracks = self.project.tracks
-        chosen = set(self.timeline.selected_indices()) - {source}
+        chosen = set(self._selected_indices()) - {source}
         dialog = QDialog(self)
         dialog.setWindowTitle("Apply downbeats")
         form = QFormLayout(dialog)
@@ -3073,7 +4049,8 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.removeEventFilter(self)
         self.timer.stop()
-        self.timeline.clear_scene()
+        for timeline in self._timelines():
+            timeline.clear_scene()
         self.beat_jobs.cancel()
         self.onset_jobs.cancel()
         self.stem_jobs.cancel()

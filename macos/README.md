@@ -22,7 +22,7 @@ It checks the macOS version, Apple Silicon or Intel, free disk space, and the ne
 
 It installs Python 3.12 from python.org when this Mac does not already have Python 3.12. The official installer is one universal package for Apple Silicon and Intel. macOS asks for your password for that step only.
 
-Beat analysis uses a second, private Python 3.11. If that part cannot be installed or compiled, SonicLab still opens and says advanced Madmom analysis is unavailable until it is repaired. Repair it by double-clicking **Update SonicLab.command**. The details are in `~/Library/Logs/SonicLab/install.log`.
+Beat analysis uses madmom-infer inside SonicLab's own Python 3.12. It does not need a second Python, Cython, or NumPy 1.23. The first analysis downloads the pretrained weights into `~/.cache/madmom_infer`. Those weights are CC BY-NC-SA 4.0. They are not in the zip, and downloading them does not make them commercially usable. If madmom-infer cannot be installed, setup falls back to the older Madmom 0.16 folder. Set `SONICLAB_MADMOM_LEGACY=1` before installing to use that older folder on purpose. If beat analysis cannot be installed, SonicLab still opens. The details are in `~/Library/Logs/SonicLab/install.log`.
 
 SonicLab's libraries go in a private folder:
 
@@ -79,16 +79,21 @@ Fetched on the Mac when needed:
 | Demucs 4.0.1 | MIT | Code only. |
 | PyTorch 2.2.2 | BSD | CPU build used here. MPS is not certified by this installer. |
 | `htdemucs_6s` weights | Not bundled | Downloaded by Demucs into Application Support. The Demucs project says the weight licence is not clear. Do not ship those files inside a product until that is settled. |
-| Madmom 0.16.1 | Code metadata says BSD. The model files in the package are CC BY-NC-SA 4.0 | Downloaded into a private Python 3.11 folder. Not in the zip. Not linked by the Audio Unit plugins. The model licence does not allow commercial use without permission from the model authors. Do not ship the models, or a product that depends on them, as a closed commercial application. |
-| Python 3.11.9 | PSF Licence | Used only for Madmom. NumPy 1.23.5 has no Python 3.12 build, and Madmom calls NumPy names that NumPy 2 removed. |
+| madmom-infer 0.3.0, commit `bffead9` | Source code is BSD-2-Clause | Installed into SonicLab's Python 3.12 folder. Pure Python. Not linked by the Audio Unit plugins. |
+| Downbeat model weights | CC BY-NC-SA 4.0 | Downloaded on first use from the CPJKU model repository into `~/.cache/madmom_infer`. Not in the zip. No commercially licensed replacement weights were found. Downloading them does not grant commercial use. This installer does not claim commercial clearance. |
+| Madmom 0.16.1, Python 3.11.9 | Code metadata says BSD. The model files in the package are CC BY-NC-SA 4.0 | Fallback only, in a private Python 3.11 folder, when madmom-infer cannot be installed or `SONICLAB_MADMOM_LEGACY=1`. NumPy 1.23.5 and a Cython compile are required for that fallback. |
 
 JUCE is AGPL or a commercial licence and is involved only if you choose to compile the Audio Unit. That plugin is not part of the zip. ONNX Runtime is not installed by this setup.
 
 ## Beat analysis
 
-Madmom does not run inside SonicLab's main Python. The app's NumPy is 2.x, and importing Madmom there fails because Madmom still uses `np.int` and `np.float`. Those names are absent from NumPy 1.24 onward.
+The primary path is madmom-infer on SonicLab's Python 3.12. It is pure Python plus NumPy and SciPy. It does not compile Cython and it does not need NumPy 1.23. The worker is `tools/madmom_infer_worker.py`. The installed copy is `~/Library/Application Support/SonicLab/madmom_infer_worker.py`.
 
-The working set, checked by running audio through the models, is:
+On first use, madmom-infer downloads the eight `downbeats_blstm_*.pkl` files and checks their hashes. They stay in `~/.cache/madmom_infer`. Uninstall removes that cache. The same non-commercial licence applies after the download. No separate commercially usable weights are published with madmom-infer.
+
+Setup tracks a 16-second click and expects a tempo between 110 and 130 BPM. A copy that already passes is not reinstalled.
+
+If that install or the click check fails, setup uses the older Madmom 0.16 worker instead:
 
 - Python 3.11
 - Madmom 0.16.1
@@ -96,14 +101,12 @@ The working set, checked by running audio through the models, is:
 - SciPy 1.10.1
 - Cython 0.29.37
 - mido 1.3.3
-- setuptools older than 81, because Madmom imports `pkg_resources`
+- setuptools older than 81
 
-PyPI has no Madmom wheels, only a source package. NumPy and SciPy have separate Apple Silicon and Intel wheels for Python 3.11, so those are not compiled. Madmom's own audio extensions are compiled on the Mac. If Apple's command-line compiler is missing, setup explains that and opens Apple's installer. Full Xcode is not required. If the compiler is not ready yet, SonicLab still opens and the status line says advanced Madmom analysis is unavailable. Double-click **Update SonicLab.command** after the compiler finishes.
+That fallback compiles Madmom on the Mac. If Apple's command-line compiler is missing, setup explains that and SonicLab still opens. The older worker remains available with `SONICLAB_MADMOM_LEGACY=1`. On a development machine it is `.venv-madmom/bin/python` plus `tools/madmom_worker.py`.
 
-The eight `downbeats_blstm_*.pkl` files ship inside the Madmom package. They are checked for presence and size, then a 16-second click is tracked. An environment that already passes that check is not reinstalled.
-
-On a development machine the same worker is `.venv-madmom/bin/python` plus `tools/madmom_worker.py`. The installed app looks in `~/Library/Application Support/SonicLab/madmom-venv` instead, so deleting the downloaded project folder does not remove beat analysis.
+Audio that is not a 44100 Hz WAV is converted before inference. WAV files at another rate are resampled. Other formats need ffmpeg.
 
 ## What has not been tested
 
-The Madmom audio checks in this document were run on this Linux machine. The Mac installer itself was not run on Apple Silicon or Intel hardware. NumPy and SciPy wheels for both Mac processors are published; Madmom still has to compile there. Do not treat this as proof of Mac audio playback, recording, Demucs, MPS, or Audio Unit validation.
+The beat comparison in this change was run on Linux with Python 3.12.11. Python 3.11 and 3.13 were not executed here. The Mac installer was not run on Apple Silicon or Intel hardware. madmom-infer publishes wheels-free Python that depends on NumPy and SciPy wheels for those Mac processors, and its torch backend rejects Apple MPS. This setup uses the NumPy backend only. Do not treat this as proof of Mac audio playback, recording, Demucs, MPS, or Audio Unit validation.

@@ -19,8 +19,10 @@
 //
 // Confidences are 0..1 heuristics from peak prominence and score margins,
 // not probabilities. Live mode re-estimates every half second on the last
-// 12 s and emits beats about 0.25 s after they happen; file mode analyses
-// the whole stream in finish().
+// 12 s and emits beats about 0.25 s after they happen. It keeps the phase
+// of the beats it has already reported unless a new phase holds for 4 s,
+// so off-beat accents do not move the beat. File mode analyses the whole
+// stream in finish() and is more accurate (see native/README.md).
 #pragma once
 
 #include <atomic>
@@ -139,6 +141,8 @@ private:
     std::int64_t sampleBase_ = 0;  // stream position of feature sample 0
     std::int64_t lastUpdate_ = 0;  // absolute frame
     double lastEmitted_ = -1e9;    // absolute frame of the last emitted beat
+    std::vector<double> emitted_;  // live mode: recent emitted beats, absolute frames
+    int disagreements_ = 0;        // live updates in a row whose beats left the reported grid
     int lastPosition_ = 0;         // beat in bar of the last emitted beat
     int lastBeatsPerBar_ = 0;
     double smoothedBpm_ = 0.0;

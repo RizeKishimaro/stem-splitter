@@ -18,6 +18,14 @@ dependencies = [
     "aubio>=0.4.9",
 ]
 
+# Optional. The code is BSD-2-Clause. The pretrained weights it downloads
+# are CC BY-NC-SA 4.0 and are not a dependency of this package. Do not treat
+# this extra as commercial clearance for those weights.
+[project.optional-dependencies]
+beats = [
+    "madmom-infer @ git+https://github.com/openmirlab/madmom-infer.git@bffead9be61857fd44b2e0d3a2510d9d94c8f2d2",
+]
+
 [project.scripts]
 soniclab = "soniclab.main:main"
 

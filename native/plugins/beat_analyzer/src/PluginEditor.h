@@ -12,6 +12,10 @@ class BeatAnalyzerEditor final : public plugin::AnalysisEditorBase {
 public:
     explicit BeatAnalyzerEditor(BeatAnalyzerProcessor& owner);
 
+    // True when the beat lane shows a finished file's whole timeline, false
+    // when it shows the live input.
+    bool showingFileTimeline() const { return fileTimeline_; }
+
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;

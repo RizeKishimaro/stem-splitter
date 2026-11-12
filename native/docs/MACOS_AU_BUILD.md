@@ -178,6 +178,26 @@ On Apple Silicon you can also validate the Intel slice:
    try a drag from Logic's own browser or a region, and say whether the
    plugin or Logic took it.
 
+## Why the plugin can say "No input signal"
+
+The plugin measures exactly what the host passes through it. The message
+appears after one second of silence at its input, and means one of:
+
+* **In Logic:** the track is not playing, the region is silent at that
+  point, or the plugin sits on a track with no audio (an empty audio
+  track, or an instrument track with nothing playing). Logic only sends
+  audio through an effect while the track plays or is record-armed with
+  input monitoring on. "No audio is running" instead means Logic has
+  stopped calling the plugin at all, which Logic does on idle tracks.
+* **In the standalone app:** JUCE's standalone wrapper mutes the
+  microphone input by default (Options → Audio/MIDI Settings → "Mute
+  audio input"), because the app plays its input straight back out and a
+  laptop's speakers would feed back into its microphone. While that is
+  ticked, the plugin receives silence, so the meter stays at -60 and no
+  beats are found. Untick it only with headphones on. This protection is
+  JUCE's and is kept on purpose. It does not exist in Logic, where the AU
+  receives the track's audio directly.
+
 ## 6. Troubleshooting
 
 | Symptom | Try |

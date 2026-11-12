@@ -31,6 +31,15 @@ python -m soniclab.main
 If MP3 files fail to load, install a libsndfile build with MPEG support or convert
 them to WAV/FLAC with FFmpeg.
 
+Beat and downbeat analysis is optional. It uses madmom-infer, not the old Madmom package:
+
+```fish
+python -m venv .venv-madmom-infer
+.venv-madmom-infer/bin/python -m pip install "madmom-infer @ git+https://github.com/openmirlab/madmom-infer.git@bffead9be61857fd44b2e0d3a2510d9d94c8f2d2"
+```
+
+SonicLab finds that interpreter on its own. The first analysis downloads the pretrained weights into `~/.cache/madmom_infer`. Those weights are CC BY-NC-SA 4.0. They are not commercially licensed, and downloading them does not change that. Files that are not 44100 Hz WAV need ffmpeg on `PATH`. `SONICLAB_MADMOM_LEGACY=1` keeps using `.venv-madmom` and `tools/madmom_worker.py`.
+
 ## Audio engine notes
 
 The application uses one PortAudio output stream. All clips are mixed in the callback

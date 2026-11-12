@@ -97,11 +97,14 @@ export TORCH_HOME="${ROOT}/models"
 if [[ -x "${DEMUCS}" && -f "${ROOT}/demucs-venv/.soniclab-ready" ]]; then
     export SONICLAB_DEMUCS_PYTHON="${DEMUCS}"
 fi
-if [[ -x "${ROOT}/madmom-venv/bin/python" && -f "${ROOT}/madmom-venv/.soniclab-ready" ]]; then
+if [[ -f "${ROOT}/.soniclab-infer-ready" && -f "${ROOT}/madmom_infer_worker.py" ]] && "${PYTHON}" -c "import madmom_infer" >/dev/null 2>&1; then
+    export SONICLAB_MADMOM_PYTHON="${PYTHON}"
+    export SONICLAB_MADMOM_WORKER="${ROOT}/madmom_infer_worker.py"
+elif [[ -x "${ROOT}/madmom-venv/bin/python" && -f "${ROOT}/madmom-venv/.soniclab-ready" ]]; then
     export SONICLAB_MADMOM_PYTHON="${ROOT}/madmom-venv/bin/python"
-fi
-if [[ -f "${ROOT}/madmom_worker.py" ]]; then
-    export SONICLAB_MADMOM_WORKER="${ROOT}/madmom_worker.py"
+    if [[ -f "${ROOT}/madmom_worker.py" ]]; then
+        export SONICLAB_MADMOM_WORKER="${ROOT}/madmom_worker.py"
+    fi
 fi
 cd "${HOME}"
 "${PYTHON}" -m soniclab.main >>"${LOG}" 2>&1

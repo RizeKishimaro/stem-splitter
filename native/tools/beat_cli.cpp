@@ -1,13 +1,17 @@
 // Runs SonicLab's native beat tracker on raw audio, for comparing it with
 // other analysers (see scripts/compare_beats.py). Development tool only.
 //
-//   soniclab_beat_cli <sample rate> [min bpm] [max bpm] [meter choice] < mono_float32.raw
+//   soniclab_beat_cli <sample rate> [min bpm] [max bpm] [meter choice] [live] < mono_float32.raw
+//
+// "live" runs the tracker the way the plugin runs it on incoming audio
+// (rolling window, beats reported as they are found) instead of on the whole file.
 //
 // Reads little-endian float32 mono samples from stdin and prints one JSON
 // object: tempo, confidences, beats per bar and [seconds, beat in bar] pairs.
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "beat_analyzer/beat_tracker.h"
@@ -38,7 +42,8 @@ int main(int argc, char** argv) {
     settings.minBpm = &minBpm;
     settings.maxBpm = &maxBpm;
     settings.meterChoice = &meter;
-    BeatTracker tracker(BeatTracker::Mode::File, settings);
+    const bool live = argc > 5 && std::string(argv[5]) == "live";
+    BeatTracker tracker(live ? BeatTracker::Mode::Live : BeatTracker::Mode::File, settings);
     tracker.reset(rate);
     Collect sink;
     analysis::AudioChunk chunk;
@@ -53,7 +58,7 @@ int main(int argc, char** argv) {
     }
     tracker.finish(sink);
 
-    const auto summary = tracker.summary();
+    auto summary = tracker.summary();
     std::printf("{\"bpm\": %.3f, \"tempo_confidence\": %.3f, \"beats_per_bar\": %d, \"meter_confidence\": %.3f, "
                 "\"downbeat_confidence\": %.3f, \"beats\": [",
                 static_cast<double>(summary.tempoBpm), static_cast<double>(summary.tempoConfidence), summary.beatsPerBar,

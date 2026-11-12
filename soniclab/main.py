@@ -22,6 +22,16 @@ def configure_macos() -> None:
     demucs = demucs_root / "bin" / "python"
     if "SONICLAB_DEMUCS_PYTHON" not in os.environ and (demucs_root / ".soniclab-ready").is_file() and demucs.is_file():
         os.environ["SONICLAB_DEMUCS_PYTHON"] = str(demucs)
+    infer_python = root / "venv" / "bin" / "python"
+    infer_worker = root / "madmom_infer_worker.py"
+    if (
+        "SONICLAB_MADMOM_PYTHON" not in os.environ
+        and (root / ".soniclab-infer-ready").is_file()
+        and infer_python.is_file()
+        and infer_worker.is_file()
+    ):
+        os.environ["SONICLAB_MADMOM_PYTHON"] = str(infer_python)
+        os.environ.setdefault("SONICLAB_MADMOM_WORKER", str(infer_worker))
     madmom_root = root / "madmom-venv"
     madmom = madmom_root / "bin" / "python"
     worker = root / "madmom_worker.py"
@@ -33,8 +43,36 @@ def configure_macos() -> None:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
 
+def configure_drag_log() -> None:
+    """Write drag-and-drop decisions and any uncaught error to
+    ``~/.cache/soniclab/drag.log`` (kept small), so a drag that does not do
+    what it should can be traced after the fact."""
+    import logging
+    import traceback
+    from logging.handlers import RotatingFileHandler
+
+    folder = Path.home() / ".cache" / "soniclab"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(folder / "drag.log", maxBytes=512_000, backupCount=1, encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger = logging.getLogger("soniclab.drag")
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    previous = sys.excepthook
+
+    def log_errors(kind, value, trace):
+        logger.error("uncaught error:\n%s", "".join(traceback.format_exception(kind, value, trace)))
+        previous(kind, value, trace)
+
+    sys.excepthook = log_errors
+
+
 def main():
     configure_macos()
+    configure_drag_log()
     app = QApplication(sys.argv)
     app.setApplicationName("SonicLab")
     app.setStyle("Fusion")

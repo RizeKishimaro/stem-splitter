@@ -667,6 +667,156 @@ TEST("plugin.live_audio_reports_tempo_without_allocating") {
     processor->releaseResources();
 }
 
+TEST("plugin.live_beats_take_the_lane_from_a_finished_file") {
+    const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                          .getNonexistentChildFile("soniclab_lane", ".wav", false);
+    writeWav(file, groove(44100.0, 100.0, 16.0), 44100.0);
+    auto processor = makeProcessor(juce::AudioChannelSet::stereo());
+    std::unique_ptr<juce::AudioProcessorEditor> editor(processor->createEditorIfNeeded());
+    auto& beatEditor = dynamic_cast<BeatAnalyzerEditor&>(*editor);
+    beatEditor.filesDropped({file.getFullPathName()}, 10, 10);
+    CHECK(waitForFile(processor->fileAnalysis()).status == FileAnalysisResult::Status::Done);
+    file.deleteFile();
+    beatEditor.refresh();
+    CHECK(beatEditor.showingFileTimeline());  // nothing heard live yet
+
+    // Live audio with a beat takes the lane over...
+    const auto audio = groove(kRate, 128.0, 12.0);
+    juce::MidiBuffer midi;
+    juce::AudioBuffer<float> block(2, kBlock);
+    int done = 0;
+    for (; done + kBlock <= audio.getNumSamples(); done += kBlock) {
+        for (int ch = 0; ch < 2; ++ch) block.copyFrom(ch, 0, audio, ch, done, kBlock);
+        processor->processBlock(block, midi);
+        for (int wait = 0; wait < 2000 && processor->pipeline().framesAnalyzed() < done; ++wait) juce::Thread::sleep(1);
+    }
+    beatEditor.refresh();
+    CHECK(!beatEditor.showingFileTimeline());
+    saveSnapshot(*editor, "SONICLAB_EDITOR_BOTH_SNAPSHOT");
+
+    // ...and gives it back when the input goes quiet.
+    block.clear();
+    for (int i = 0; i < static_cast<int>(3.0 * kRate) / kBlock; ++i) {
+        processor->processBlock(block, midi);
+        done += kBlock;
+        for (int wait = 0; wait < 2000 && processor->pipeline().framesAnalyzed() < done; ++wait) juce::Thread::sleep(1);
+    }
+    beatEditor.refresh();
+    CHECK(beatEditor.showingFileTimeline());
+
+    processor->editorBeingDeleted(editor.get());
+    editor.reset();
+    processor->releaseResources();
+}
+
+// ---- real recordings (opt-in)
+//
+// SONICLAB_REAL_AUDIO=<file> runs one recording through the plugin three
+// ways and writes what it found as JSON to SONICLAB_REAL_AUDIO_OUT:
+//   file     dropped onto the editor (FileAnalysis, whole-file tracker)
+//   stereo   played through processBlock on a stereo bus
+//   mono     the same, downmixed, on a mono bus
+// scripts/compare_beats.py --plugin compares the result with Madmom.
+// Without the variable the test does nothing and passes.
+
+namespace {
+juce::String markersJson(const std::vector<soniclab::AnalysisMarker>& markers, double rate) {
+    juce::StringArray items;
+    for (const auto& m : markers)
+        items.add("[" + juce::String(m.seconds(rate), 4) + ", " + juce::String(static_cast<int>(m.beatInBar)) + "]");
+    return "[" + items.joinIntoString(", ") + "]";
+}
+
+juce::String summaryJson(const soniclab::analysis::AnalysisSummary& s) {
+    return "\"bpm\": " + juce::String(s.tempoBpm, 3) + ", \"tempo_confidence\": " + juce::String(s.tempoConfidence, 3) +
+           ", \"beats_per_bar\": " + juce::String(s.beatsPerBar) + ", \"meter_confidence\": " +
+           juce::String(s.meterConfidence, 3) + ", \"downbeat_confidence\": " + juce::String(s.downbeatConfidence, 3);
+}
+
+// Plays ``audio`` through a fresh processor in host-sized blocks, as fast as
+// the analysis worker keeps up, and returns its live markers and summary.
+juce::String playLive(const juce::AudioBuffer<float>& audio, double rate, const juce::AudioChannelSet& layout,
+                      int& allocations, std::uint64_t& dropped) {
+    auto processor = std::make_unique<BeatAnalyzerProcessor>();
+    juce::AudioProcessor::BusesLayout buses;
+    buses.inputBuses.add(layout);
+    buses.outputBuses.add(layout);
+    CHECK(processor->setBusesLayout(buses));
+    constexpr int block = 512;
+    processor->setRateAndBufferSizeDetails(rate, block);
+    processor->prepareToPlay(rate, block);
+    const auto channels = layout.size();
+    juce::AudioBuffer<float> buffer(channels, block);
+    juce::MidiBuffer midi;
+    std::vector<soniclab::AnalysisMarker> markers;
+    for (int done = 0; done + block <= audio.getNumSamples(); done += block) {
+        for (int ch = 0; ch < channels; ++ch) {
+            if (channels == 1 && audio.getNumChannels() > 1) {
+                buffer.copyFrom(0, 0, audio.getReadPointer(0, done), block, 0.5f);
+                buffer.addFrom(0, 0, audio.getReadPointer(1, done), block, 0.5f);
+            } else {
+                buffer.copyFrom(ch, 0, audio, std::min(ch, audio.getNumChannels() - 1), done, block);
+            }
+        }
+        const juce::AudioBuffer<float> before(buffer);
+        tracking = true;
+        processor->processBlock(buffer, midi);
+        tracking = false;
+        allocations += trackedAllocations.exchange(0);
+        for (int ch = 0; ch < channels; ++ch)
+            CHECK(std::memcmp(buffer.getReadPointer(ch), before.getReadPointer(ch), sizeof(float) * block) == 0);
+        for (int wait = 0; wait < 5000 && processor->pipeline().framesAnalyzed() < done; ++wait) juce::Thread::sleep(1);
+        // Keep every marker: the processor itself keeps only the latest 4096.
+        const auto& seen = processor->collectMarkers();
+        if (!seen.empty() && (markers.empty() || seen.back().samplePosition > markers.back().samplePosition))
+            for (const auto& m : seen)
+                if (markers.empty() || m.samplePosition > markers.back().samplePosition) markers.push_back(m);
+    }
+    dropped += processor->pipeline().droppedFrames();
+    const auto json = "{" + summaryJson(processor->liveSummary()) + ", \"beats\": " + markersJson(markers, rate) + "}";
+    processor->releaseResources();
+    return json;
+}
+}  // namespace
+
+TEST("plugin.real_audio_through_the_plugin") {
+    const char* path = std::getenv("SONICLAB_REAL_AUDIO");
+    if (path == nullptr) return;
+    const juce::File source(path);
+    CHECK(source.existsAsFile());
+
+    // File analysis, the way a drop on the editor does it.
+    auto processor = makeProcessor(juce::AudioChannelSet::stereo());
+    processor->fileAnalysis().start(source);
+    FileAnalysisResult file;
+    for (int i = 0; i < 120000; ++i) {
+        file = processor->fileAnalysis().snapshot();
+        if (file.status != FileAnalysisResult::Status::Analysing) break;
+        juce::Thread::sleep(5);
+    }
+    CHECK(file.status == FileAnalysisResult::Status::Done);
+    processor->releaseResources();
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(source));
+    CHECK(reader != nullptr);
+    juce::AudioBuffer<float> audio(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
+    reader->read(&audio, 0, audio.getNumSamples(), 0, true, true);
+    const auto rate = reader->sampleRate;
+
+    int allocations = 0;
+    std::uint64_t dropped = 0;
+    const auto stereo = playLive(audio, rate, juce::AudioChannelSet::stereo(), allocations, dropped);
+    const auto mono = playLive(audio, rate, juce::AudioChannelSet::mono(), allocations, dropped);
+    CHECK_EQ(allocations, 0);
+    CHECK_EQ(dropped, std::uint64_t{0});
+
+    const auto json = "{\"file\": {" + summaryJson(file.summary) + ", \"beats\": " + markersJson(file.markers, file.sampleRate) +
+                      "}, \"stereo\": " + stereo + ", \"mono\": " + mono + "}";
+    if (const char* out = std::getenv("SONICLAB_REAL_AUDIO_OUT")) juce::File(out).replaceWithText(json);
+}
+
 int main(int argc, char** argv) {
     juce::ScopedJuceInitialiser_GUI juce;
     const char* prefix = argc > 1 ? argv[1] : "";
