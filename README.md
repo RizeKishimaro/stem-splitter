@@ -1,4 +1,4 @@
-# SonicLab
+# Stem Session
 
 A lightweight Python/PySide6 multitrack audio workstation foundation.
 
