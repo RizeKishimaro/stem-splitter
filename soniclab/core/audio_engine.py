@@ -1,4 +1,5 @@
 import threading
+import time
 import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
@@ -9,6 +10,8 @@ from soniclab.core.ring_buffer import StereoRing
 OUTPUT_RATE = 44100
 BLOCK_SIZE = 512
 RING_SECONDS = 2
+# Blocks of playback history kept for drawing the playhead (about 0.2 s).
+HEARD_BLOCKS = 16
 
 def render_clips(clips, start, frames, output_gain=1.0, master_muted=False, include=None):
     """Mix ``frames`` samples from arrangement frame ``start``, offline.
@@ -88,6 +91,11 @@ class AudioEngine:
         self._scratch = np.zeros((BLOCK_SIZE, 2), dtype=np.float32)
         self._loop_start = None
         self._loop_end = None
+        # What the speakers play and when, for drawing the playhead: one
+        # (monotonic time the block starts sounding, ((frame, span), ...))
+        # entry per recent block. The callback swaps in a new tuple, so the
+        # UI reads it without the lock and never waits on the audio thread.
+        self._heard: tuple = ()
 
     @property
     def position(self):
@@ -98,6 +106,32 @@ class AudioEngine:
     def playing(self):
         with self._lock:
             return self._playing
+
+    def heard_position(self, now: float | None = None) -> float:
+        """Seconds playing out of the speakers at ``now`` (``time.monotonic()``).
+
+        For drawing only: it interpolates between audio blocks and allows
+        for the output latency, so a playhead redrawn at any rate moves
+        smoothly and lines up with what is heard. It never takes the engine
+        lock. Stopped, or before the first block sounds, it is ``position``.
+        """
+        heard = self._heard
+        if not heard:
+            return self._position / OUTPUT_RATE
+        now = time.monotonic() if now is None else float(now)
+        for start, segments in reversed(heard):
+            if start > now:
+                continue
+            offset = (now - start) * OUTPUT_RATE
+            for frame, span in segments:
+                if offset < span:
+                    return (frame + offset) / OUTPUT_RATE
+                offset -= span
+            # The next block is late: hold at the end of this one.
+            frame, span = segments[-1]
+            return (frame + span) / OUTPUT_RATE
+        # Nothing has sounded yet: the first block starts the playhead.
+        return heard[0][1][0][0] / OUTPUT_RATE
 
     @property
     def output_gain(self) -> float:
@@ -235,6 +269,9 @@ class AudioEngine:
     def seek(self, seconds):
         with self._lock:
             self._position = max(0, int(seconds * OUTPUT_RATE))
+            # Show the new place at once and hold it there until the first
+            # block from it reaches the speakers.
+            self._heard = ((time.monotonic(), ((self._position, 0),)),) if self._playing else ()
 
     def set_loop(self, start_seconds, end_seconds) -> bool:
         """Loop in arrangement samples. The end is exclusive."""
@@ -293,6 +330,7 @@ class AudioEngine:
             soloed = any(clip.get("solo") for clip in clips)
             capture = self._capture_enabled and frames <= len(self._scratch)
             segments, next_position = self._playback_segments(position, frames)
+            self._heard = (self._heard + ((self._sounds_at(time_info), tuple(segments)),))[-HEARD_BLOCKS:]
             for index, clip in enumerate(clips):
                 heard = not clip["muted"] and not (soloed and not clip.get("solo"))
                 if not heard:
@@ -358,10 +396,23 @@ class AudioEngine:
                 self._master_ring.push(outdata[:frames])
             self._position = next_position
 
+    def _sounds_at(self, time_info) -> float:
+        """Monotonic time at which the block being written starts to sound."""
+        latency = 0.0
+        try:
+            latency = float(time_info.outputBufferDacTime) - float(time_info.currentTime)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        if not 0.0 < latency < 1.0:
+            stream_latency = getattr(self._stream, "latency", 0.0)
+            latency = float(stream_latency) if isinstance(stream_latency, (int, float)) else 0.0
+        return time.monotonic() + max(0.0, min(1.0, latency))
+
     def play(self):
         with self._lock:
             if self._playing:
                 return
+            self._heard = ()
             if self._stream is None:
                 self._stream = sd.OutputStream(
                     samplerate=OUTPUT_RATE,
@@ -378,11 +429,13 @@ class AudioEngine:
     def pause(self):
         with self._lock:
             self._playing = False
+            self._heard = ()
 
     def stop(self):
         with self._lock:
             self._playing = False
             self._position = 0
+            self._heard = ()
 
     def close(self):
         with self._lock:

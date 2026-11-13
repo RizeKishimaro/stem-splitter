@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 
 import numpy as np
 import soundfile as sf
@@ -112,6 +113,10 @@ from soniclab.ui.stem_splitter import StemSplitterPanel
 from soniclab.ui.theme import DARK_STYLE, build_palette
 from soniclab.ui.visualizer import Visualizer
 from soniclab.ui.timeline import (
+    FOLLOW_CENTER,
+    FOLLOW_MODES,
+    FOLLOW_OFF,
+    FOLLOW_PAGE,
     HEADER_WIDTH,
     PIXELS_PER_SECOND,
     RULER_HEIGHT,
@@ -121,6 +126,16 @@ from soniclab.ui.timeline import (
     parse_time_signature,
     track_canvas,
 )
+
+# The playhead redraws on its own timer, about 60 times a second. Meters,
+# labels and background jobs stay on the slower transport timer.
+PLAYHEAD_FRAME_MS = 16
+FOLLOW_LABELS = {FOLLOW_OFF: "Off", FOLLOW_PAGE: "Follow", FOLLOW_CENTER: "Center"}
+FOLLOW_TIPS = {
+    FOLLOW_OFF: "The canvas stays put; the playhead moves across it",
+    FOLLOW_PAGE: "Scroll smoothly when the playhead reaches the right edge",
+    FOLLOW_CENTER: "Keep the playhead in the middle; the canvas moves behind it",
+}
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".mp3"}
 
@@ -168,6 +183,7 @@ class MainWindow(QMainWindow):
         self._canvas_positions = [0.0, 0.0]
         self._active_canvas = 0
         self._hover_canvas = 0  # the canvas the mouse was over last; Play plays it
+        self._track_focus: int | None = None  # a bar's ▶: hear only this track
         self._lane_ids = 1
         self._gesture_before = None
         self._history_frozen = False
@@ -183,6 +199,9 @@ class MainWindow(QMainWindow):
         self._playing_shown = None
         self._scroll_lock = False
         self._loop_bounds = None
+        self.follow_mode = FOLLOW_OFF
+        self._last_frame = 0.0
+        self._frames = 0
         self._build_arrangement()
         self._build_transport()
         self._build_docks()
@@ -190,8 +209,12 @@ class MainWindow(QMainWindow):
         self._connect()
         self.timer = QTimer(self)
         self.timer.setInterval(30)
-        self.timer.timeout.connect(self._refresh_transport)
+        self.timer.timeout.connect(self._transport_tick)
         self.timer.start()
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.frame_timer.setInterval(PLAYHEAD_FRAME_MS)
+        self.frame_timer.timeout.connect(self._animate_playheads)
         self._refresh_timeline()
         self._set_session_title()
         self._sync_transport_lamp()
@@ -332,9 +355,14 @@ class MainWindow(QMainWindow):
         self.snap_btn.setChecked(True)
         self.snap_btn.setToolTip("Snap clips to the beat")
         self.snap_btn.toggled.connect(self._set_snap)
+        self.follow_btn = QToolButton()
+        self.follow_btn.setObjectName("followBtn")
+        self.follow_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.follow_btn.clicked.connect(self._cycle_follow_mode)
         bar.addWidget(self.bpm)
         bar.addWidget(self.signature)
         bar.addWidget(self.snap_btn)
+        bar.addWidget(self.follow_btn)
 
         readout = QFrame()
         readout.setObjectName("lcd")
@@ -587,6 +615,21 @@ class MainWindow(QMainWindow):
             stored = QSettings("SonicLab", "SonicLab").value("view/canvasSideBySide", False)
             if str(stored).lower() in ("true", "1"):
                 self._set_canvas_layout(True)
+        follow_menu = view_menu.addMenu("Playhead Follow")
+        follow_group = QActionGroup(self)
+        self.follow_actions: dict[str, QAction] = {}
+        for mode in FOLLOW_MODES:
+            action = QAction(FOLLOW_LABELS[mode], self, checkable=True)
+            action.setToolTip(FOLLOW_TIPS[mode])
+            action.triggered.connect(lambda _checked=False, mode=mode: self._set_follow_mode(mode))
+            follow_group.addAction(action)
+            follow_menu.addAction(action)
+            self.follow_actions[mode] = action
+        follow_menu.addSeparator()
+        self._action(follow_menu, "Next Follow Mode", self._cycle_follow_mode, QKeySequence("Ctrl+Shift+F"))
+        self.follow_btn.setMenu(follow_menu)
+        stored = str(QSettings("SonicLab", "SonicLab").value("view/followPlayhead", FOLLOW_OFF))
+        self._set_follow_mode(stored if stored in FOLLOW_MODES else FOLLOW_OFF, announce=False)
         self._action(
             view_menu,
             "Zoom In",
@@ -786,7 +829,7 @@ class MainWindow(QMainWindow):
             )
             timeline.bar_edit_requested.connect(self._edit_bar)
             timeline.bars_selected.connect(self._select_bars)
-            timeline.bar_play_requested.connect(self._play_bar)
+            timeline.bar_play_requested.connect(lambda bar, track: self._play_bar(bar, track))
             timeline.downbeat_clicked.connect(self._show_bar_menu)
             timeline.rename_requested.connect(self._rename_track_at)
             timeline.canvas_move_requested.connect(self._move_track_to_canvas)
@@ -966,7 +1009,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Master volume {gain * 100:.0f}%", 1500)
 
     def _toggle_transport(self):
-        if self.engine.playing:
+        if self.engine.playing and self._track_focus is None:
             self._pause()
         else:
             self._play_hovered()
@@ -975,9 +1018,10 @@ class MainWindow(QMainWindow):
         """Play the canvas the mouse is (or was last) over, from its own
         playhead. With one canvas this is plain Play."""
         if not self.splitter2.isVisible():
-            self._play()
+            self._clear_track_focus()
+            self._play(keep_focus=True)
             return
-        if self.engine.playing and self._canvas_focus == self._hover_canvas:
+        if self.engine.playing and self._canvas_focus == self._hover_canvas and self._track_focus is None:
             return
         self._play_canvas(self._hover_canvas)
 
@@ -1360,6 +1404,10 @@ class MainWindow(QMainWindow):
         the other canvas's tracks are silent and their solos ignored; the
         tracks' own mute and solo settings are not changed."""
         outside = self._canvas_focus is not None and track_canvas(track) != self._canvas_focus
+        focus = self._track_focus
+        if focus is not None and 0 <= focus < len(self.project.tracks):
+            # A bar's ▶ plays its own track (stem) only.
+            outside = outside or self.project.tracks[focus] is not track
         self.engine.set_clip_muted(index, bool(track.get("muted", False)) or outside)
         self.engine.set_clip_solo(index, bool(track.get("solo", False)) and not outside)
 
@@ -1378,9 +1426,10 @@ class MainWindow(QMainWindow):
 
     def _play_canvas(self, canvas: int) -> None:
         """The ▶ in a canvas's corner: play that canvas alone, or stop it."""
-        if self.engine.playing and self._canvas_focus == canvas:
+        if self.engine.playing and self._canvas_focus == canvas and self._track_focus is None:
             self._pause()
             return
+        self._clear_track_focus()  # every stem on the canvas
         if canvas == 1 and not self.splitter2.isVisible():
             return
         if self.engine.playing:
@@ -1447,13 +1496,14 @@ class MainWindow(QMainWindow):
         self.play_btn.style().polish(self.play_btn)
         self.play_btn.update()
 
-    def _refresh_transport(self):
-        seconds = self.engine.position
-        minutes = int(seconds // 60)
-        secs = seconds % 60
-        self.position_label.setText(f"{minutes:02d}:{secs:06.3f}")
-        self.musical_label.setText(self._musical_position(seconds))
+    def _shown_position(self, playing: bool) -> float:
+        # Playing: what the speakers play now, between audio blocks too.
+        return self.engine.heard_position() if playing else self.engine.position
+
+    def _update_playheads(self) -> tuple[bool, float]:
+        """Move each canvas's playhead; the canvases themselves stay put."""
         playing = self.engine.playing
+        seconds = self._shown_position(playing)
         for timeline in self._timelines():
             canvas = timeline.canvas
             heard = self._canvas_focus is None or self._canvas_focus == canvas
@@ -1465,7 +1515,49 @@ class MainWindow(QMainWindow):
                 moving = canvas == self._active_canvas
             if moving:
                 self._canvas_positions[canvas] = seconds
-            timeline.set_playhead(self._canvas_positions[canvas], follow=playing and heard)
+            timeline.set_playhead(self._canvas_positions[canvas])
+        return playing, seconds
+
+    def _animate_playheads(self) -> None:
+        """One playhead frame. Reads the engine's snapshot; never waits on audio."""
+        now = time.monotonic()
+        dt = min(0.1, now - self._last_frame) if self._last_frame else PLAYHEAD_FRAME_MS / 1000.0
+        self._last_frame = now
+        shown = self._update_playheads()
+        playing = shown[0]
+        if not playing:
+            self.frame_timer.stop()
+            self._last_frame = 0.0
+        self._frames += 1
+        if not playing or self._frames % 2 == 0:
+            # Labels, meters and job polls at half the frame rate.
+            self._refresh_transport(shown)
+        if not playing or self.follow_mode == FOLLOW_OFF:
+            return
+        followers = [
+            timeline
+            for timeline in self._timelines()
+            if timeline.isVisible() and (self._canvas_focus is None or self._canvas_focus == timeline.canvas)
+        ]
+        if not self.canvas_side_by_side:
+            # Stacked canvases share one scroll; two followers would fight.
+            followers = followers[:1]
+        for timeline in followers:
+            timeline.follow_playhead(self.follow_mode, dt)
+
+    def _transport_tick(self) -> None:
+        # While playing, the frame timer moves the playhead and calls this.
+        if not self.frame_timer.isActive():
+            self._refresh_transport()
+
+    def _refresh_transport(self, shown: tuple[bool, float] | None = None):
+        playing, seconds = self._update_playheads() if shown is None else shown
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        self.position_label.setText(f"{minutes:02d}:{secs:06.3f}")
+        self.musical_label.setText(self._musical_position(seconds))
+        if playing and not self.frame_timer.isActive():
+            self.frame_timer.start()
         self._sync_transport_lamp()
         self._sync_capture()
         master, tracks = self.engine.take_peaks()
@@ -1477,15 +1569,44 @@ class MainWindow(QMainWindow):
         if self.engine.playing:
             self.stem_splitter.stop_preview()  # one sound source at a time
 
+    def _set_follow_mode(self, mode: str, announce: bool = True) -> None:
+        """Off, Follow or Center: how the canvas scrolls during playback."""
+        if mode not in FOLLOW_MODES:
+            return
+        self.follow_mode = mode
+        self.follow_actions[mode].setChecked(True)
+        self.follow_btn.setText(f"Follow: {FOLLOW_LABELS[mode]}")
+        self.follow_btn.setToolTip(
+            f"Playhead follow: {FOLLOW_LABELS[mode]}. {FOLLOW_TIPS[mode]}.\n"
+            "Click for the next mode (Ctrl+Shift+F), or pick one from the arrow"
+        )
+        if announce:
+            QSettings("SonicLab", "SonicLab").setValue("view/followPlayhead", mode)
+            self.statusBar().showMessage(f"Playhead follow: {FOLLOW_LABELS[mode]}. {FOLLOW_TIPS[mode]}", 3000)
+
+    def _cycle_follow_mode(self) -> None:
+        modes = list(FOLLOW_MODES)
+        self._set_follow_mode(modes[(modes.index(self.follow_mode) + 1) % len(modes)])
+
+    def _clear_track_focus(self) -> None:
+        if self._track_focus is not None:
+            self._track_focus = None
+            for index, track in enumerate(self.project.tracks):
+                self._push_audible(index, track)
+
     def _play(self, keep_focus: bool = False):
-        if not keep_focus and self._canvas_focus is not None:
-            self._set_canvas_focus(None)  # the transport plays both canvases
+        if not keep_focus:
+            self._clear_track_focus()
+            if self._canvas_focus is not None:
+                self._set_canvas_focus(None)  # the transport plays both canvases
         try:
             self.engine.play()
         except Exception as exc:
             QMessageBox.critical(
                 self, "Audio output error", f"Could not start audio output.\n\n{exc}"
             )
+        if self.engine.playing:
+            self.frame_timer.start()
         self._sync_transport_lamp()
 
     def _pause(self):
@@ -2119,8 +2240,11 @@ class MainWindow(QMainWindow):
 
     def _follow_scroll(self, other, value: int) -> None:
         """Keep the stacked canvases on the same stretch of time."""
-        if not self.canvas_side_by_side and other.horizontalScrollBar().value() != value:
-            other.horizontalScrollBar().setValue(value)
+        if self.canvas_side_by_side or other.horizontalScrollBar().value() == value:
+            return
+        if self.engine.playing and self._canvas_focus is not None and other.canvas != self._canvas_focus:
+            return  # one canvas plays alone: the other one stays where it is
+        other.horizontalScrollBar().setValue(value)
 
     def _match_header_widths(self, source, other) -> None:
         if not self.canvas_side_by_side:
@@ -3503,14 +3627,29 @@ class MainWindow(QMainWindow):
             return None
         return float(start), float(end)
 
-    def _play_bar(self, index: int) -> None:
+    def _play_bar(self, index: int, track: int = -1) -> None:
+        """Play one bar. From a bar's ▶ on a track (``track`` >= 0) only that
+        track (that stem) is heard; from a menu, the whole canvas in focus."""
         bounds = self._bar_bounds(index)
         if bounds is None:
             return
         start, end = bounds
+        tracks = self.project.tracks
         self._engage_loop(start, end)
+        if 0 <= track < len(tracks):
+            canvas = track_canvas(tracks[track])
+            self._track_focus = track
+            self._active_canvas = canvas
+            self._canvas_positions[canvas] = start
+            self._set_canvas_focus(canvas)  # also applies the track focus
+            self.engine.seek(start)
+            if not self.engine.playing:
+                self._play(keep_focus=True)
+            name = tracks[track].get("name", "Track")
+            self.statusBar().showMessage(f"Playing bar {index + 1} of “{name}” only", 4000)
+            return
         self.engine.seek(start)
-        self._play()
+        self._play_hovered()
         self.statusBar().showMessage(f"Playing bar {index + 1}", 4000)
 
     def _loop_bar(self, index: int) -> None:

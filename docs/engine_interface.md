@@ -29,6 +29,7 @@ boundary. It also fails if UI code reads an `engine._private` field again.
 | Per-clip mix | `set_clip_start`, `set_clip_gain`, `set_clip_pan`, `set_clip_muted`, `set_clip_solo`, `set_clip_region(index, start, offset, duration, fade_in, fade_out, clip_gain)` | An out-of-range index is ignored |
 | Master | `set_output_gain(gain)` (clamped 0..1.5), `output_gain`; `set_master_muted(bool)`, `master_muted` | The properties return plain `float` and `bool` |
 | Transport | `play()`, `pause()`, `stop()` (also rewinds to 0), `seek(seconds)`, `position` (seconds), `playing` | |
+| Playhead | `heard_position(now=None)` (seconds) | What the speakers play at monotonic time `now`, interpolated between blocks and allowing for output latency. Lock-free; for drawing only. Stopped, it equals `position` |
 | Loop | `set_loop(start, end) -> bool`, `clear_loop()`, `loop` (`(start, end)` or `None`) | The end is exclusive |
 | Offline mix | `render(start_frame, frames, include=None)` | Same mix as playback; used by bar export |
 | Meters and scope | `take_peaks() -> (master, [tracks])` (reads and resets), `set_capture(bool)`, `read_master(count)`, `read_track(index, count)` | Scope reads return N×2 float32 |

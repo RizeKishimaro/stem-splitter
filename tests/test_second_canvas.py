@@ -356,7 +356,7 @@ class SecondCanvasTests(unittest.TestCase):
         button = next(child for child in clip.childItems() if type(child).__name__ == "BarPlayButton")
         centre = clip.mapToScene(button.mapRectToParent(button.rect()).center())
         played = []
-        window.timeline.bar_play_requested.connect(played.append)
+        window.timeline.bar_play_requested.connect(lambda bar, track: played.append(bar))
         self.drag(window.timeline, centre, window.timeline, QPointF(centre.x() + PIXELS_PER_SECOND, centre.y()))
         self.assertAlmostEqual(piece["start"], 3.5, places=2)
         self.assertEqual(played, [])
@@ -364,9 +364,60 @@ class SecondCanvasTests(unittest.TestCase):
         clip = self.clips(window.timeline)[window.project.tracks.index(piece)]
         button = next(child for child in clip.childItems() if type(child).__name__ == "BarPlayButton")
         centre = clip.mapToScene(button.mapRectToParent(button.rect()).center())
+        top = clip.pos().y()
         self.drag(window.timeline, centre, window.timeline, centre)
         self.assertEqual(played, [1])
         self.assertAlmostEqual(piece["start"], 3.5, places=2)
+        # The clip stays where it was: nothing left half-dragged.
+        clip = self.clips(window.timeline)[window.project.tracks.index(piece)]
+        self.assertAlmostEqual(clip.pos().y(), top, places=1)
+        self.assertTrue(clip.isVisible())
+
+    def test_a_bar_play_button_plays_that_stem_only(self):
+        window = self.window
+        engine = window.engine
+        state = {"playing": False}
+        at = int(2.5 * OUTPUT_RATE)  # drums 0.5, bass 0.1
+        with patch.object(type(engine), "playing", new_callable=PropertyMock) as playing, \
+                patch.object(engine, "play", lambda: state.update(playing=True)), \
+                patch.object(engine, "pause", lambda: state.update(playing=False)):
+            playing.side_effect = lambda: state["playing"]
+            window.timeline.bar_play_requested.emit(1, 0)  # drums' bar 2 ▶
+            self.assertTrue(engine.playing)
+            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.5, places=3)  # drums only
+            window.timeline.bar_play_requested.emit(1, 1)  # bass's bar 2 ▶
+            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.1, places=3)  # bass only
+            # Space plays every stem on the canvas again.
+            window._hover_canvas = 0
+            window._toggle_transport()
+            self.assertIsNone(window._track_focus)
+            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.6, places=3)
+            window._pause()
+            self.assertNotIn("muted", window.project.tracks[1])  # own settings untouched
+
+    def test_the_silent_canvas_does_not_scroll_while_the_other_plays(self):
+        window = self.window
+        self.open_second_canvas()
+        window._move_track_to_canvas(1, 1)
+        for view in (window.timeline, window.timeline2):
+            view.zoom_horizontal(8.0)
+        self.app.processEvents()
+        bar, bar2 = window.timeline.horizontalScrollBar(), window.timeline2.horizontalScrollBar()
+        self.assertGreater(bar.maximum(), 100)
+        engine = window.engine
+        state = {"playing": False}
+        with patch.object(type(engine), "playing", new_callable=PropertyMock) as playing, \
+                patch.object(engine, "play", lambda: state.update(playing=True)), \
+                patch.object(engine, "pause", lambda: state.update(playing=False)):
+            playing.side_effect = lambda: state["playing"]
+            bar.setValue(50)  # stopped: stacked canvases scroll together
+            self.assertEqual(bar2.value(), 50)
+            window.headers.play_requested.emit()  # the main canvas alone
+            bar.setValue(100)
+            self.assertEqual(bar2.value(), 50)
+            window.headers.play_requested.emit()  # stop
+            bar.setValue(80)
+            self.assertEqual(bar2.value(), 80)
 
     def playhead_seconds(self, view):
         return (view.playhead.line().x1() - 0) / view.pixels_per_second

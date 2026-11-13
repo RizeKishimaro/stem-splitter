@@ -1,12 +1,14 @@
 import bisect
+from collections import OrderedDict
 import logging
 import sys
 import math
+import time
 
 import numpy as np
 from shiboken6 import isValid
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPen, QPainter, QPolygonF
 
 from soniclab.core.audio_engine import OUTPUT_RATE
@@ -23,6 +25,7 @@ from soniclab.core.bar_map import (
 from soniclab.core.beats import analyze_beats
 from soniclab.core.waveform import cached_envelope, display_envelope, pixel_columns
 from PySide6.QtWidgets import (
+    QGraphicsItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -52,6 +55,19 @@ def track_canvas(track) -> int:
 HEADER_WIDTH = 0
 PIXELS_PER_SECOND = 90.0
 RULER_HEIGHT = 32
+# Waveforms are cached as images this many pixels wide, a few per clip.
+WAVE_TILE = 1024
+WAVE_TILES_KEPT = 8
+# How the canvas follows the playhead during playback.
+FOLLOW_OFF = "off"  # the canvas stays put; the playhead moves across it
+FOLLOW_PAGE = "follow"  # glide only when the playhead reaches the right edge
+FOLLOW_CENTER = "center"  # keep the playhead in the middle
+FOLLOW_MODES = (FOLLOW_OFF, FOLLOW_PAGE, FOLLOW_CENTER)
+FOLLOW_EASE_SECONDS = 0.09  # time constant of the glide after a jump
+USER_SCROLL_HOLD = 1.5  # seconds a manual scroll pauses following
+PLAYHEAD_COLOR = QColor("#F4F6F8")
+PLAYHEAD_GLOW = QColor(244, 246, 248, 46)
+PLAYHEAD_EDGE = QColor("#0C0D10")
 CLIP_HEIGHT = 54
 CLIP_TOP = 10
 CLIP_BODY = QColor("#1C382C")
@@ -187,6 +203,9 @@ class ClipItem(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        # Paint gets the exposed strip, so a moving playhead redraws a few
+        # pixels of the clip instead of all of it.
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
 
         self.setZValue(3)
         self.setToolTip(
@@ -204,9 +223,8 @@ class ClipItem(QGraphicsRectItem):
         self._mins, self._maxs = self._source
         self._upper = self._mins
         self._lower = self._maxs
-        self._raster = None
-        self._raster_key = None
-        self._raster_bytes = b""
+        self._tiles: OrderedDict = OrderedDict()  # tile index -> (bytes, QImage)
+        self._tiles_key = None
         self._fit_envelope()
         self._beats: tuple[float, ...] = ()
         self._beat_origin = 0.0
@@ -306,8 +324,7 @@ class ClipItem(QGraphicsRectItem):
         self._mins, self._maxs = display_envelope(self._source[0], self._source[1], width)
         self._upper, self._lower = pixel_columns(self._mins, self._maxs, width)
         self._fit_width = width
-        self._raster = None
-        self._raster_key = None
+        self._tiles.clear()
 
     def _draw_title(self, name):
         shown = name if len(name) <= 32 else name[:31] + "…"
@@ -410,38 +427,36 @@ class ClipItem(QGraphicsRectItem):
             painter.drawRect(QRectF(left + 1, 1, right - left - 5, height - 2))
 
     def _paint_wave(self, painter, left: float, right: float):
-        image = self._ensure_raster()
-        if image is not None:
-            start = max(0, int(left) - 1)
-            stop = min(image.width(), int(math.ceil(right)) + 2)
-            if stop > start:
-                painter.drawImage(start, 0, image, start, 0, stop - start, image.height())
-            return
-        self._fit_envelope()
-        count = int(self._upper.size)
-        if count == 0:
-            return
-        start = max(0, int(left) - 1)
-        stop = min(count, int(right) + 2)
-        if stop <= start:
-            return
-        raw, image = self._rasterize(start, stop)
-        self._raster_bytes = raw
-        painter.drawImage(start, 0, image)
-
-    def _ensure_raster(self):
-        """Reuse one image for clips that fit on a few screens."""
         self._fit_envelope()
         width = int(self._upper.size)
-        height = max(1, int(self.rect().height()))
-        if width == 0 or width > 8192:
-            return None
-        key = (width, height, self._show_beats, self._beats)
-        if self._raster is not None and self._raster_key == key:
-            return self._raster
-        self._raster_bytes, self._raster = self._rasterize(0, width)
-        self._raster_key = key
-        return self._raster
+        if width == 0:
+            return
+        left = max(0, int(left) - 1)
+        right = min(width, int(math.ceil(right)) + 2)
+        for tile in range(left // WAVE_TILE, (right - 1) // WAVE_TILE + 1):
+            image = self._wave_tile(tile, width)
+            origin = tile * WAVE_TILE
+            start = max(origin, left)
+            stop = min(origin + image.width(), right)
+            if stop > start:
+                painter.drawImage(start, 0, image, start - origin, 0, stop - start, image.height())
+
+    def _wave_tile(self, tile: int, width: int) -> QImage:
+        """One cached slice of the waveform image, drawn on first use."""
+        key = (width, max(1, int(self.rect().height())), self._show_beats, self._beats)
+        if key != self._tiles_key:
+            self._tiles.clear()
+            self._tiles_key = key
+        cached = self._tiles.get(tile)
+        if cached is not None:
+            self._tiles.move_to_end(tile)
+            return cached[1]
+        start = tile * WAVE_TILE
+        cached = self._rasterize(start, min(width, start + WAVE_TILE))
+        self._tiles[tile] = cached
+        while len(self._tiles) > WAVE_TILES_KEPT:
+            self._tiles.popitem(last=False)
+        return cached[1]
 
     def _rasterize(self, start: int, stop: int):
         span = max(1, stop - start)
@@ -693,11 +708,16 @@ class ClipItem(QGraphicsRectItem):
             and press is not None
             and (QPointF(event.scenePos()) - press).manhattanLength() < 4
         ):
-            # A click on the bar's play button, not a drag.
+            # A click on the bar's play button, not a drag. End the press as
+            # Qt would, so no row drag or move is left half-started.
             self._block_press = None
             self._block_dragging = False
+            self._group = False
             self._press_scene = None
-            event.accept()
+            self._row_drag = False
+            if self._y_locked and abs(float(self.pos().y()) - self._locked_y) > 0.5:
+                self.setPos(self.pos().x(), self._locked_y)
+            super().mouseReleaseEvent(event)
             if isValid(button):
                 button.play()
             return
@@ -785,6 +805,59 @@ class ClipItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
+class PlayheadItem(QGraphicsItem):
+    """The transport indicator: one line across every track of a canvas.
+
+    A hairline with a soft glow and a handle in the ruler. It moves with
+    ``setPos``, so each frame repaints only the strip it left and the strip
+    it entered; the clips and grid underneath are not rebuilt.
+    """
+
+    HALF_WIDTH = 6.0
+    HANDLE_HEIGHT = 12.0
+
+    def __init__(self, height: float):
+        super().__init__()
+        self._height = float(height)
+        self.setZValue(26)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def set_height(self, height: float) -> None:
+        if abs(height - self._height) >= 1:
+            self.prepareGeometryChange()
+            self._height = float(height)
+
+    def line(self) -> QLineF:
+        """The indicator in scene coordinates."""
+        x = self.x()
+        return QLineF(x, 0, x, self._height)
+
+    def boundingRect(self) -> QRectF:
+        # One pixel of slack each side for antialiased edges.
+        return QRectF(-self.HALF_WIDTH - 1, 0, 2 * self.HALF_WIDTH + 2, self._height)
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillRect(QRectF(-1.5, RULER_HEIGHT, 3.0, self._height - RULER_HEIGHT), PLAYHEAD_GLOW)
+        painter.fillRect(QRectF(-0.5, 0, 1.0, self._height), PLAYHEAD_COLOR)
+        half = self.HALF_WIDTH
+        handle = QPolygonF(
+            [
+                QPointF(-half, 1),
+                QPointF(half, 1),
+                QPointF(half, self.HANDLE_HEIGHT - half * 0.6),
+                QPointF(0, self.HANDLE_HEIGHT),
+                QPointF(-half, self.HANDLE_HEIGHT - half * 0.6),
+            ]
+        )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(PLAYHEAD_EDGE, 1))
+        painter.setBrush(PLAYHEAD_COLOR)
+        painter.drawPolygon(handle)
+        painter.restore()
+
+
 class BarPlayButton(QGraphicsRectItem):
     """Play one bar. Sits in the middle of that bar's block."""
 
@@ -811,7 +884,9 @@ class BarPlayButton(QGraphicsRectItem):
         )
 
     def play(self) -> None:
-        self._view.bar_play_requested.emit(self._index)
+        clip = self.parentItem()
+        track = clip.clip_index if isinstance(clip, ClipItem) else -1
+        self._view.bar_play_requested.emit(self._index, track)
 
     def mousePressEvent(self, event):
         # Let the clip underneath take the press: a click still plays the bar
@@ -831,7 +906,7 @@ class TimelineView(QGraphicsView):
     # Zero-based first and last bar of a Shift-click range on the ruler.
     bars_selected = Signal(int, int)
     # Zero-based bar whose play button was pressed.
-    bar_play_requested = Signal(int)
+    bar_play_requested = Signal(int, int)  # bar, and the track whose ▶ it was (-1: none)
     # Zero-based bar and a global position, from a click on a downbeat marker.
     downbeat_clicked = Signal(int, QPoint)
     # Track whose name was double-clicked on the clip.
@@ -876,7 +951,7 @@ class TimelineView(QGraphicsView):
         # addLine/addRect/addText/addItem results are owned by Python.
         # Without these references, garbage collection deletes the timeline.
         self._retained: list = []
-        self.playhead: QGraphicsLineItem | None = None
+        self.playhead: PlayheadItem | None = None
         self.pixels_per_second = float(PIXELS_PER_SECOND)
         self.track_height = TRACK_HEIGHT
         self.snap_to_grid = True
@@ -910,6 +985,9 @@ class TimelineView(QGraphicsView):
         self._ghosts: list = []  # outlines of dragged items shown on this canvas
         self._block_ghost = None
         self._block_drag = None
+        self._scrub = False  # dragging the playhead handle in the ruler
+        self._user_scrolled_at = -1e9  # monotonic time of the last manual scroll
+        self.horizontalScrollBar().sliderPressed.connect(self._note_user_scroll)
         self.scene_obj.selectionChanged.connect(self._on_selection)
 
     @property
@@ -988,22 +1066,14 @@ class TimelineView(QGraphicsView):
         self._retained.clear()
         self.scene_obj.clear()
 
-    def _create_playhead(self, height) -> QGraphicsLineItem:
-        playhead = self._keep(
-            self.scene_obj.addLine(
-                HEADER_WIDTH,
-                0,
-                HEADER_WIDTH,
-                height,
-                QPen(QColor("#D7B36A"), 1.5),
-            )
-        )
-        playhead.setZValue(20)
-        playhead.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+    def _create_playhead(self, height) -> PlayheadItem:
+        playhead = self._keep(PlayheadItem(height))
+        playhead.setPos(HEADER_WIDTH, 0)
+        self.scene_obj.addItem(playhead)
         self.playhead = playhead
         return playhead
 
-    def _live_playhead(self, height) -> QGraphicsLineItem:
+    def _live_playhead(self, height) -> PlayheadItem:
         current = self.playhead
         if current is not None and isValid(current):
             return current
@@ -1668,6 +1738,10 @@ class TimelineView(QGraphicsView):
         if self.peer is None:
             return
         peer_pos = self._peer_scene_pos(scene_pos) if scene_pos is not None else None
+        dragged = [item for item in self._clip_items() if item.isSelected() or item is clip]
+        for item in dragged:
+            # Faded while over the other canvas: they are leaving this one.
+            item.setOpacity(0.35 if peer_pos is not None else 1.0)
         if peer_pos is None:
             self.peer.show_ghosts([])
             return
@@ -1776,22 +1850,70 @@ class TimelineView(QGraphicsView):
         return int(row_h - 16), 8
 
     def set_playhead(self, seconds, follow=False):
+        """Move the indicator. The canvas stays where it is.
+
+        ``follow=True`` also centres the view on it at once; playback
+        scrolling goes through ``follow_playhead`` instead.
+        """
         height = max(500, int(self.scene_obj.sceneRect().height()))
-        x = HEADER_WIDTH + seconds * self.pixels_per_second
+        x = HEADER_WIDTH + float(seconds) * self.pixels_per_second
         playhead = self._live_playhead(height)
         try:
-            line = playhead.line()
-            if abs(line.x1() - x) < 0.5 and abs(line.y2() - height) < 1:
-                if follow:
-                    self._center_playhead(x)
-                return
-            playhead.setLine(x, 0, x, height)
+            playhead.set_height(height)
+            if abs(playhead.x() - x) >= 0.05:
+                playhead.setPos(x, 0)
         except RuntimeError:
             self.playhead = None
-            replacement = self._create_playhead(height)
-            replacement.setLine(x, 0, x, height)
+            self._create_playhead(height).setPos(x, 0)
         if follow:
             self._center_playhead(x)
+
+    def playhead_x(self) -> float | None:
+        playhead = self.playhead
+        if playhead is None or not isValid(playhead):
+            return None
+        return float(playhead.x())
+
+    def _note_user_scroll(self) -> None:
+        self._user_scrolled_at = time.monotonic()
+
+    def follow_playhead(self, mode: str, dt: float) -> None:
+        """Scroll for one animation frame of ``dt`` seconds, per ``mode``.
+
+        Off: never scroll. Follow: once the playhead reaches the right edge
+        the canvas glides with it, holding it there; if it lands off screen
+        (a seek, a loop restart) the canvas eases over to it. Center: the
+        canvas moves under a playhead held in the middle, and eases rather
+        than jumps when the playhead does. A manual scroll pauses following
+        for a moment so it does not fight the user.
+        """
+        x = self.playhead_x()
+        width = self.viewport().width()
+        if mode not in (FOLLOW_PAGE, FOLLOW_CENTER) or x is None or width < 2 or self._scrub:
+            return
+        if time.monotonic() - self._user_scrolled_at < USER_SCROLL_HOLD:
+            return
+        bar = self.horizontalScrollBar()
+        if bar.isSliderDown():
+            return
+        left = self.mapToScene(0, 0).x()
+        margin = min(width * 0.25, max(40.0, width * 0.12))
+        if mode == FOLLOW_CENTER:
+            target = x - width / 2.0
+        elif x > left + width - margin:
+            target = x - (width - margin)
+        elif x < left:
+            target = x - margin
+        else:
+            return
+        error = target - left
+        if abs(error) < 0.5:
+            return
+        if abs(error) > max(48.0, width * 0.1):
+            # The playhead jumped: ease over instead of snapping the canvas.
+            error *= 1.0 - math.exp(-max(0.0, dt) / FOLLOW_EASE_SECONDS)
+        value = int(round(bar.value() + error))
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), value)))
 
     def _center_playhead(self, x: float) -> None:
         """Scroll so the indicator sits on the horizontal middle of the view."""
@@ -1917,8 +2039,31 @@ class TimelineView(QGraphicsView):
             return list(self._bar_lines[: max(len(self._bar_map), index + 1)])
         return list(self._bar_lines)
 
+    def on_playhead_handle(self, view_pos) -> bool:
+        """True over the playhead's handle at the top of the ruler."""
+        x = self.playhead_x()
+        if x is None:
+            return False
+        pos = self.mapToScene(view_pos)
+        return pos.y() <= PlayheadItem.HANDLE_HEIGHT + 2 and abs(pos.x() - x) <= PlayheadItem.HALF_WIDTH + 2
+
+    def _scrub_to(self, view_pos) -> None:
+        x = self.mapToScene(view_pos).x()
+        seconds = max(0.0, (x - HEADER_WIDTH) / self.pixels_per_second)
+        self.set_playhead(seconds)  # at once, not on the next frame
+        self.seek_requested.emit(seconds)
+
     def mousePressEvent(self, event):
         pos = self.mapToScene(event.position().toPoint())
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and self.on_playhead_handle(event.position().toPoint())
+        ):
+            # The handle drags the playhead, even over a bar line.
+            self._scrub = True
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and pos.y() <= RULER_HEIGHT and self._bar_lines:
             seconds = max(0.0, (pos.x() - HEADER_WIDTH) / self.pixels_per_second)
             bar = max(0, bar_index(self._bar_lines, seconds, self._bar_fallback))
@@ -1975,8 +2120,11 @@ class TimelineView(QGraphicsView):
                         event.accept()
                         return
                 elif pos.x() >= HEADER_WIDTH:
-                    seconds = (pos.x() - HEADER_WIDTH) / self.pixels_per_second
-                    self.seek_requested.emit(max(0.0, seconds))
+                    # A press on the ruler moves the playhead; dragging scrubs.
+                    self._scrub = True
+                    self._scrub_to(view_pos)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
 
     def _drag_seconds(self, event) -> float:
@@ -1985,6 +2133,11 @@ class TimelineView(QGraphicsView):
         return max(0.0, (x - HEADER_WIDTH) / self.pixels_per_second)
 
     def mouseMoveEvent(self, event):
+        if self._scrub:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._scrub_to(event.position().toPoint())
+            event.accept()
+            return
         if self._band is not None:
             origin, band, _add = self._band
             if isValid(band):
@@ -1996,6 +2149,7 @@ class TimelineView(QGraphicsView):
             delta = event.position() - origin
             if abs(delta.x()) + abs(delta.y()) >= 4:
                 self._canvas_panned = True
+                self._note_user_scroll()
                 self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             self.horizontalScrollBar().setValue(int(scroll_x - delta.x()))
             self.verticalScrollBar().setValue(int(scroll_y - delta.y()))
@@ -2016,7 +2170,9 @@ class TimelineView(QGraphicsView):
             return
         if not event.buttons():
             line = self.bar_line_at(event.position().toPoint())
-            if line >= 0:
+            if self.on_playhead_handle(event.position().toPoint()):
+                self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
+            elif line >= 0:
                 self.viewport().setCursor(Qt.CursorShape.SizeHorCursor)
                 QToolTip.showText(event.globalPosition().toPoint(), self.bar_tooltip(line), self.viewport())
             else:
@@ -2024,6 +2180,10 @@ class TimelineView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._scrub and event.button() == Qt.MouseButton.LeftButton:
+            self._scrub = False
+            event.accept()
+            return
         if self._canvas_pan is not None and event.button() == Qt.MouseButton.MiddleButton:
             self._canvas_pan = None
             self._canvas_panned = False
@@ -2129,9 +2289,12 @@ class TimelineView(QGraphicsView):
                 event.accept()
                 return
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self._note_user_scroll()
             self._scroll_horizontal(self._wheel_pixels(event))
             event.accept()
             return
+        if event.angleDelta().x() or event.pixelDelta().x():
+            self._note_user_scroll()
         super().wheelEvent(event)
 
     def _scroll_horizontal(self, pixels: int) -> None:
