@@ -25,6 +25,7 @@ from soniclab.core.bar_map import (
 from soniclab.core.beats import analyze_beats
 from soniclab.core.waveform import cached_envelope, display_envelope, pixel_columns
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -68,6 +69,11 @@ USER_SCROLL_HOLD = 1.5  # seconds a manual scroll pauses following
 PLAYHEAD_COLOR = QColor("#F4F6F8")
 PLAYHEAD_GLOW = QColor(244, 246, 248, 46)
 PLAYHEAD_EDGE = QColor("#0C0D10")
+# A stem block playing on its own (its ▶ turned to ⏸): tint, edge, cursor.
+PREVIEW_TINT = QColor(120, 200, 150, 40)
+PREVIEW_PAUSED_TINT = QColor(200, 200, 200, 22)
+PREVIEW_EDGE = QColor("#8FE0A8")
+PREVIEW_CURSOR = QColor("#E9FFF0")
 CLIP_HEIGHT = 54
 CLIP_TOP = 10
 CLIP_BODY = QColor("#1C382C")
@@ -241,6 +247,8 @@ class ClipItem(QGraphicsRectItem):
         self._block_press = None
         self._block_dragging = False
         self._hidden_span = None
+        # Preview voices on this clip's blocks: bar -> (playing, local x).
+        self._preview: dict[int, tuple[bool, float]] = {}
         self.block_drag_callback = None
         self.block_drop_callback = None
         # Called on release with (clip, scene position, scene position of the
@@ -248,6 +256,10 @@ class ClipItem(QGraphicsRectItem):
         self.canvas_drop_callback = None
         self._press_scene = None
         self._press_play = None
+        self._dragging_whole = False  # a one-block clip past the drag distance
+        self._press_item_pos = QPointF()
+        # ``outside_drop(clip, scene pos)``: True when released on neither canvas.
+        self.outside_drop = None
         self._press_downbeat = None
         # While the clip is dragged it may change rows: ``row_snap(clip, y)``
         # returns the y of the row under the clip, and ``row_drop(clip)`` on
@@ -375,6 +387,8 @@ class ClipItem(QGraphicsRectItem):
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.setPen(QPen(QColor("#D7B36A"), 1.5))
                     painter.drawRect(block)
+        if self._preview:
+            self._paint_preview(painter)
         if self._hidden_span is not None:
             left, right = self._hidden_span
             painter.setPen(Qt.PenStyle.NoPen)
@@ -399,9 +413,52 @@ class ClipItem(QGraphicsRectItem):
         if len(self._block_spans) > 1:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             self.setToolTip(
-                f"{self.name} · drag to move the track · {BAR_DRAG_KEY}-drag to move one bar"
+                f"{self.name} · drag a bar block to move just that block"
                 " · double-click the name to rename"
             )
+
+    def _block_rect(self, bar: int) -> QRectF | None:
+        for span in self._block_spans or ((0, 0.0, float(self.rect().width()), 0.0, 0.0),):
+            if span[0] == bar:
+                return QRectF(float(span[1]), 0, max(0.0, float(span[2]) - float(span[1])), self.rect().height())
+        return None
+
+    def set_preview(self, marks: dict) -> None:
+        """Show which blocks play on their own: ``bar -> (playing, local x)``.
+
+        Repaints only what changed: a whole block when it starts, pauses or
+        stops, otherwise the two thin strips its cursor moved between.
+        """
+        old = self._preview
+        if marks == old:
+            return
+        self._preview = dict(marks)
+        for bar in set(old) | set(marks):
+            before, after = old.get(bar), marks.get(bar)
+            if before == after:
+                continue
+            block = self._block_rect(bar)
+            if block is None:
+                continue
+            if before is None or after is None or before[0] != after[0]:
+                self.update(block.adjusted(-2, 0, 2, 0))
+                continue
+            for x in (before[1], after[1]):
+                self.update(QRectF(x - 3, 0, 6, self.rect().height()))
+
+    def _paint_preview(self, painter) -> None:
+        height = self.rect().height()
+        for bar, (playing, x) in self._preview.items():
+            block = self._block_rect(bar)
+            if block is None:
+                continue
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PREVIEW_TINT if playing else PREVIEW_PAUSED_TINT)
+            painter.drawRect(block)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(PREVIEW_EDGE if playing else CLIP_EDGE, 1.5))
+            painter.drawRect(block.adjusted(1, 1, -1, -1))
+            painter.fillRect(QRectF(x - 1.0, 1, 2.0, height - 2), PREVIEW_CURSOR)
 
     def _span_at(self, x: float):
         for span in self._block_spans:
@@ -622,12 +679,18 @@ class ClipItem(QGraphicsRectItem):
         if event.button() == Qt.MouseButton.LeftButton and self.group_drag is not None:
             # Pressing anywhere else ends the bar selection.
             self.group_drag(None, None, None, None)
+        if event.button() == Qt.MouseButton.LeftButton and self._press_play is not None:
+            # ▶ / ⏸ is a button: it plays or pauses on release and never drags.
+            event.accept()
+            return
         if (
             event.button() == Qt.MouseButton.LeftButton
             and len(self._block_spans) > 1
-            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
             and self._edge_at(event.pos().x()) is None
         ):
+            # A left-drag moves the one stem block under the mouse. The rest
+            # of the track, its row and the canvas stay where they are.
             span = self._span_at(event.pos().x())
             if span is not None:
                 if self.scene() is not None:
@@ -649,6 +712,8 @@ class ClipItem(QGraphicsRectItem):
             event.accept()
             return
         self._row_drag = event.button() == Qt.MouseButton.LeftButton
+        self._dragging_whole = False
+        self._press_item_pos = QPointF(self.pos())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -663,10 +728,17 @@ class ClipItem(QGraphicsRectItem):
             return
         super().mouseDoubleClickEvent(event)
 
+    def _past_drag_distance(self, scene_pos) -> bool:
+        press = self._press_scene
+        return press is None or (QPointF(scene_pos) - press).manhattanLength() >= QApplication.startDragDistance()
+
     def mouseMoveEvent(self, event):
+        if self._press_play is not None:
+            event.accept()  # a press on ▶ / ⏸ does not drag
+            return
         if self._block_press is not None:
             span, origin = self._block_press
-            moved = (event.scenePos() - origin).manhattanLength() >= 4 or self._block_dragging
+            moved = self._block_dragging or self._past_drag_distance(event.scenePos())
             if moved:
                 self._block_dragging = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -676,6 +748,10 @@ class ClipItem(QGraphicsRectItem):
             event.accept()
             return
         if not self._edge:
+            if not self._dragging_whole and not self._past_drag_distance(event.scenePos()):
+                event.accept()  # a click, or a hand that wobbled: not a drag yet
+                return
+            self._dragging_whole = True
             super().mouseMoveEvent(event)
             if self.drag_move is not None and event.buttons() & Qt.MouseButton.LeftButton:
                 self.drag_move(self, QPointF(event.scenePos()))
@@ -756,13 +832,17 @@ class ClipItem(QGraphicsRectItem):
             row_drag,
             int(event.modifiers().value),
         )
-        if (
+        outside = self.outside_drop is not None and self.outside_drop(self, QPointF(event.scenePos()))
+        if outside:
+            # Released on neither canvas: back where it was picked up.
+            self.setPos(self._press_item_pos)
+        elif (
             press is not None
             and self.canvas_drop_callback is not None
             and self.canvas_drop_callback(self, QPointF(event.scenePos()), press)
         ):
             return
-        if row_drag and self.row_drop is not None and self.row_drop(self):
+        if not outside and row_drag and self.row_drop is not None and self.row_drop(self):
             return
         if self._y_locked and abs(float(self.pos().y()) - self._locked_y) > 0.5:
             self.setPos(self.pos().x(), self._locked_y)  # same row after all
@@ -868,9 +948,24 @@ class BarPlayButton(QGraphicsRectItem):
         self.setZValue(15)
         self.setBrush(QBrush(QColor("#1A201C")))
         self.setPen(QPen(QColor("#C6A56A"), 1))
-        self.setToolTip(f"Play bar {index + 1}")
+        self.playing = False  # shows ⏸ while this block's voice plays
+        self.setToolTip(f"Play bar {index + 1} of this stem on its own")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+
+    @property
+    def index(self) -> int:
+        return self._index
+
+    def set_playing(self, playing: bool) -> None:
+        playing = bool(playing)
+        if playing == self.playing:
+            return
+        self.playing = playing
+        verb = "Pause" if playing else "Play"
+        self.setToolTip(f"{verb} bar {self._index + 1} of this stem on its own")
+        self.setPen(QPen(PREVIEW_EDGE if playing else QColor("#C6A56A"), 1))
+        self.update()
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -879,9 +974,13 @@ class BarPlayButton(QGraphicsRectItem):
         painter.drawRoundedRect(self.rect(), 2, 2)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(QColor("#E7F2EA")))
-        painter.drawPolygon(
-            QPolygonF([QPointF(5, 4), QPointF(5, 12), QPointF(12, 8)])
-        )
+        if self.playing:
+            painter.drawRect(QRectF(4.5, 4, 2.5, 8))
+            painter.drawRect(QRectF(9.0, 4, 2.5, 8))
+        else:
+            painter.drawPolygon(
+                QPolygonF([QPointF(5, 4), QPointF(5, 12), QPointF(12, 8)])
+            )
 
     def play(self) -> None:
         clip = self.parentItem()
@@ -986,6 +1085,8 @@ class TimelineView(QGraphicsView):
         self._block_ghost = None
         self._block_drag = None
         self._scrub = False  # dragging the playhead handle in the ruler
+        self._clip_cache: dict = {}  # track index -> ClipItem
+        self._previewed: set[int] = set()  # clips showing a block voice
         self._user_scrolled_at = -1e9  # monotonic time of the last manual scroll
         self.horizontalScrollBar().sliderPressed.connect(self._note_user_scroll)
         self.scene_obj.selectionChanged.connect(self._on_selection)
@@ -1058,6 +1159,8 @@ class TimelineView(QGraphicsView):
         address, and a later item allocated there comes back as the old type.
         """
         self.playhead = None
+        self._clip_cache = {}
+        self._previewed = set()
         self._loop_region_item = None
         self._bar_handles = []
         self._bar_drag = None
@@ -1069,6 +1172,7 @@ class TimelineView(QGraphicsView):
     def _create_playhead(self, height) -> PlayheadItem:
         playhead = self._keep(PlayheadItem(height))
         playhead.setPos(HEADER_WIDTH, 0)
+        playhead.setVisible(getattr(self, "_playhead_shown", True))
         self.scene_obj.addItem(playhead)
         self.playhead = playhead
         return playhead
@@ -1299,6 +1403,7 @@ class TimelineView(QGraphicsView):
             clip.block_drag_callback = self._drag_block
             clip.block_drop_callback = self._drop_block
             clip.canvas_drop_callback = self._drop_clip_on_peer
+            clip.outside_drop = lambda _clip, scene_pos: not self.over_canvas(scene_pos)
             clip.row_snap = self._snap_to_row
             clip.row_drop = self._drop_clip_on_row
             clip.group_drag = self._drag_group
@@ -1462,6 +1567,30 @@ class TimelineView(QGraphicsView):
             return self._display_top(len(primaries), primaries)
         return self._display_top(display_row, primaries)
 
+    def cancel_block_drag(self) -> bool:
+        """Esc during a block drag: drop nothing, put the block back."""
+        drag = self._block_drag
+        if drag is None:
+            return False
+        clip = drag["clip"]
+        if self.peer is not None:
+            self.peer.show_drop_ghost(None, 0, 0, clip)
+        self._clear_block_drag(restore=True)
+        if isValid(clip):
+            clip._block_press = None
+            clip._block_dragging = False
+            clip._group = False
+            clip.setCursor(Qt.CursorShape.OpenHandCursor)
+            if clip.scene() is not None and clip.scene().mouseGrabberItem() is clip:
+                clip.ungrabMouse()
+        return True
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self.cancel_block_drag():
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _clear_block_drag(self, restore: bool) -> None:
         drag = self._block_drag
         ghost = self._block_ghost
@@ -1484,6 +1613,12 @@ class TimelineView(QGraphicsView):
                 button.setVisible(True)
 
     def _drop_block(self, clip: ClipItem, span, scene_pos: QPointF, origin: QPointF) -> None:
+        if not self.over_canvas(scene_pos):
+            # Dropped on neither canvas: nothing moves, the block comes back.
+            DRAG_LOG.info("canvas %s: block dropped outside the canvases, cancelled", self.canvas)
+            if self._block_drag is not None:
+                self.cancel_block_drag()
+            return
         if self._block_drag is None:
             self._drag_block(clip, span, scene_pos, origin)
         drag = self._block_drag
@@ -1536,6 +1671,21 @@ class TimelineView(QGraphicsView):
             return
         payload = (clip.clip_index, local_start, local_duration, new_start, share, insert_at, bar, None, join)
         QTimer.singleShot(0, lambda payload=payload, callback=callback: callback(*payload))
+
+    def over_canvas(self, scene_pos: QPointF) -> bool:
+        """True when ``scene_pos`` is level with this canvas or the other one
+        (past their left or right edge still counts: the timeline goes on).
+        A drop above or below both, on the toolbar, mixer or status bar, is
+        cancelled."""
+        point = self.viewport().mapToGlobal(self.mapFromScene(scene_pos))
+        for view in (self, self.peer):
+            if view is None or not view.isVisible():
+                continue
+            pane = view.parentWidget() or view
+            top = pane.mapToGlobal(pane.rect().topLeft()).y()
+            if top <= point.y() <= top + pane.height():
+                return True
+        return False
 
     def _peer_scene_pos(self, scene_pos: QPointF) -> QPointF | None:
         """``scene_pos`` (this view's scene) in the other canvas's scene, when
@@ -1721,7 +1871,7 @@ class TimelineView(QGraphicsView):
         self.show_ghosts([])
         if self.peer is not None:
             self.peer.show_ghosts([])
-        if drag is None or "target" not in drag:
+        if drag is None or "target" not in drag or not self.over_canvas(scene_pos):
             return
         canvas, target_row, shift = drag["target"]
         blocks = [(item[0], item[1], item[2], item[3]) for item in drag["blocks"]]
@@ -1867,6 +2017,69 @@ class TimelineView(QGraphicsView):
             self._create_playhead(height).setPos(x, 0)
         if follow:
             self._center_playhead(x)
+
+    def set_playhead_visible(self, visible: bool) -> None:
+        """Hide the transport indicator (a stem block plays on its own) or
+        show it again. Its position is not touched."""
+        self._playhead_shown = bool(visible)
+        playhead = self.playhead
+        if playhead is not None and isValid(playhead) and playhead.isVisible() != bool(visible):
+            playhead.setVisible(bool(visible))
+
+    def _clip_for(self, index: int):
+        clip = self._clip_cache.get(index)
+        if clip is None or not isValid(clip):
+            self._clip_cache = {item.clip_index: item for item in self._clip_items()}
+            clip = self._clip_cache.get(index)
+        return clip
+
+    def block_times(self, index: int, bar: int) -> tuple[float, float] | None:
+        """Arrangement start and end of one bar block of track ``index``."""
+        clip = self._clip_for(index)
+        if clip is None:
+            return None
+        start = (float(clip.pos().x()) - HEADER_WIDTH) / self.pixels_per_second
+        for span in self._spans_of(clip):
+            if span[0] == bar and span[4] > span[3]:
+                return start + float(span[3]), start + float(span[4])
+        return None
+
+    def block_at(self, view_pos) -> tuple[int, int] | None:
+        """``(track, bar)`` of the block under a viewport position."""
+        clip = self.clip_at(view_pos)
+        if clip is None:
+            return None
+        local = clip.mapFromScene(self.mapToScene(view_pos)).x()
+        for span in self._spans_of(clip):
+            if span[1] - 1 <= local <= span[2] + 1:
+                return clip.clip_index, int(span[0])
+        return None
+
+    def set_previews(self, states: dict) -> None:
+        """Show stem block voices: ``(track, bar) -> (playing, seconds)``.
+
+        Each block's ▶ becomes ⏸ while it plays; the block is tinted and a
+        cursor marks where it is. Only clips whose state changed repaint.
+        """
+        by_clip: dict[int, dict] = {}
+        pps = self.pixels_per_second
+        for (index, bar), (playing, seconds) in states.items():
+            clip = self._clip_for(index)
+            if clip is None:
+                continue
+            local = HEADER_WIDTH + float(seconds) * pps - float(clip.pos().x())
+            by_clip.setdefault(index, {})[int(bar)] = (bool(playing), round(local, 1))
+        for index in self._previewed | set(by_clip):
+            clip = self._clip_for(index)
+            if clip is None:
+                continue
+            marks = by_clip.get(index, {})
+            clip.set_preview(marks)
+            for child in clip.childItems():
+                if isinstance(child, BarPlayButton):
+                    mark = marks.get(child.index)
+                    child.set_playing(mark is not None and mark[0])
+        self._previewed = set(by_clip)
 
     def playhead_x(self) -> float | None:
         playhead = self.playhead

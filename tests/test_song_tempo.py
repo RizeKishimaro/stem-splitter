@@ -72,6 +72,7 @@ class SongTempoTests(unittest.TestCase):
         self.window = MainWindow()
         self.window.beat_jobs = _Jobs(drums)
         self.window._import_paths([str(drums), str(bass)], split=False)
+        self.window.finish_loading()
         self.window.project.tracks[0]["drum_reference"] = True
         self.window._refresh_timeline()
         self.app.processEvents()

@@ -446,6 +446,7 @@ class MainWindowTests(unittest.TestCase):
             return_value=(paths, ""),
         ):
             self.window._import_audio()
+        self.window.finish_loading()  # files are decoded off the GUI thread
 
     def test_import_queues_the_source_for_beat_markers(self):
         class Jobs:
@@ -670,10 +671,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertAlmostEqual(clips[0].pos().y(), clips[1].pos().y())
 
 
-    def test_a_track_cut_into_bars_moves_whole_again_and_again(self):
-        # Regression: once downbeats cut a track into bar blocks, a plain drag
-        # only pulled one bar out, so the track could be moved once (before
-        # the analysis finished) and never again.
+    def test_a_bar_block_moves_alone_again_and_again(self):
+        # A left-drag takes the bar under the mouse; the track keeps its
+        # other bars where they are. The moved bar is then one piece that
+        # can be dragged again and again.
         audio = np.full((OUTPUT_RATE * 8, 2), 0.5, dtype=np.float32)
         window = self.window
         window.project.tracks.append(
@@ -686,10 +687,13 @@ class MainWindowTests(unittest.TestCase):
         view.resize(1400, 300)
         window.show()
         self.app.processEvents()
-        track = window.project.tracks[0]
+        name = "drums"
         for expected in (1.0, 2.0, 3.0):
-            clip = next(item for item in view.scene_obj.items() if isinstance(item, ClipItem) and isValid(item))
-            self.assertGreater(len(clip._block_spans), 1)
+            clip = next(
+                item for item in view.scene_obj.items()
+                if isinstance(item, ClipItem) and isValid(item)
+                and window.project.tracks[item.clip_index]["name"] == name
+            )
             point = view.mapFromScene(QPointF(clip.pos().x() + 0.3 * PIXELS_PER_SECOND, clip.pos().y() + clip.rect().height() * 0.75))
             target = point + QPoint(int(PIXELS_PER_SECOND), 0)
             for kind, at, buttons in (
@@ -703,11 +707,14 @@ class MainWindowTests(unittest.TestCase):
                 QApplication.sendEvent(view.viewport(), event)
                 self.app.processEvents()
             self.app.processEvents()
-            self.assertEqual(len(window.project.tracks), 1)  # moved, not cut
-            self.assertAlmostEqual(track["start"], expected, places=2)
-            self.assertAlmostEqual(track["duration"], 8.0)
-        self.assertAlmostEqual(float(window.engine.render(int(3.1 * OUTPUT_RATE), 4)[0, 0]), 0.5, places=3)
-        self.assertAlmostEqual(float(window.engine.render(int(2.9 * OUTPUT_RATE), 4)[0, 0]), 0.0, places=3)
+            name = "drums · bar 1"
+            piece = next(track for track in window.project.tracks if track["name"] == name)
+            self.assertAlmostEqual(piece["start"], expected, places=2)
+            self.assertAlmostEqual(piece["duration"], 2.0)
+            rest = next(track for track in window.project.tracks if track["name"] == "drums")
+            self.assertAlmostEqual(rest["start"], 2.0)  # bars 2-4 never moved
+            self.assertAlmostEqual(rest["duration"], 6.0)
+        self.assertEqual(len(window.project.tracks), 2)
 
     def test_a_moved_bar_can_be_dragged_again_as_one_piece(self):
         # Regression: a bar dropped off the bar grid (here one beat late) was

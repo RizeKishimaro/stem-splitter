@@ -30,9 +30,11 @@ boundary. It also fails if UI code reads an `engine._private` field again.
 | Master | `set_output_gain(gain)` (clamped 0..1.5), `output_gain`; `set_master_muted(bool)`, `master_muted` | The properties return plain `float` and `bool` |
 | Transport | `play()`, `pause()`, `stop()` (also rewinds to 0), `seek(seconds)`, `position` (seconds), `playing` | |
 | Playhead | `heard_position(now=None)` (seconds) | What the speakers play at monotonic time `now`, interpolated between blocks and allowing for output latency. Lock-free; for drawing only. Stopped, it equals `position` |
+| Block preview | `preview_play([(key, clip, start, end), ...])`, `preview_pause(key)`, `preview_stop(key)`, `preview_stop_all()`, `previews(now=None) -> {key: (playing, seconds)}` | Voices that play part of a clip on their own, mixed with the transport into the same output, which they never move. Blocks passed together start on the same sample; a paused voice resumes where it stopped; a finished one drops out of `previews`. A limiter holds the sum under full scale only while a voice plays. `previews` is lock-free |
 | Loop | `set_loop(start, end) -> bool`, `clear_loop()`, `loop` (`(start, end)` or `None`) | The end is exclusive |
 | Offline mix | `render(start_frame, frames, include=None)` | Same mix as playback; used by bar export |
 | Meters and scope | `take_peaks() -> (master, [tracks])` (reads and resets), `set_capture(bool)`, `read_master(count)`, `read_track(index, count)` | Scope reads return N×2 float32 |
+| Batching | `with engine.batch(): ...` | Several clip changes that the audio thread must see all at once (a reload). Keep the block short: the audio callback waits for it |
 | Lifecycle | `close()` | Stops and releases the output stream |
 | Utility | `AudioEngine.resample(audio, rate)` (static), `OUTPUT_RATE`, `BLOCK_SIZE` | |
 

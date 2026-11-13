@@ -4,12 +4,17 @@ The timeline draws one filled shape from these arrays. It does not turn
 each bucket into its own graphics item.
 """
 
+import weakref
+
 import numpy as np
 
 # One peak pair per 32 samples is finer than a pixel at the closest zoom.
 SAMPLES_PER_BUCKET = 32
 
 _CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+# The same buffer again (a canvas rebuild, the other canvas): found by
+# identity, without mixing it to mono just to fingerprint it.
+_BY_BUFFER: dict[int, tuple] = {}
 
 
 def mono(audio) -> np.ndarray:
@@ -86,6 +91,32 @@ def _fingerprint(samples: np.ndarray) -> bytes:
 
 def cached_envelope(audio) -> tuple[np.ndarray, np.ndarray]:
     """High-resolution peaks for one buffer. Repeated calls reuse the cache."""
+    key = _buffer_key(audio)
+    if key is not None:
+        known = _BY_BUFFER.get(key[0])
+        if known is not None and known[0]() is key[1]:
+            return known[1]
+    found = _envelope(audio)
+    if key is not None:
+        if len(_BY_BUFFER) > 64:
+            _BY_BUFFER.clear()
+        _BY_BUFFER[key[0]] = (weakref.ref(key[1]), found)
+    return found
+
+
+def _buffer_key(audio):
+    """``(key, owner)`` for a numpy buffer or a slice of one: the owning
+    array, where the slice starts in it and its shape. None otherwise."""
+    if not isinstance(audio, np.ndarray):
+        return None
+    owner = audio
+    while isinstance(owner.base, np.ndarray):
+        owner = owner.base
+    start = audio.__array_interface__["data"][0] - owner.__array_interface__["data"][0]
+    return (id(owner), start, audio.shape, audio.strides, audio.dtype.str), owner
+
+
+def _envelope(audio) -> tuple[np.ndarray, np.ndarray]:
     samples = mono(audio)
     key = (int(samples.size), _fingerprint(samples))
     found = _CACHE.get(key)

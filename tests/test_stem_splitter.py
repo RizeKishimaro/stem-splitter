@@ -546,6 +546,7 @@ class WindowTests(Environment):
         window = self.window
         order = track_order(SIX)
         window.stem_splitter.add_requested.emit("My Song", dict(self.result.stems), order)
+        window.finish_loading()
         names = [track["name"] for track in window.project.tracks]
         self.assertEqual(names, [f"My Song {stem}" for stem in order])
         self.assertTrue(window.project.tracks[0]["drum_reference"])
@@ -561,6 +562,7 @@ class WindowTests(Environment):
     def test_adding_only_piano_does_not_call_it_the_drum_track(self):
         window = self.window
         window.stem_splitter.add_requested.emit("My Song", {"piano": self.result.stems["piano"]}, ("piano",))
+        window.finish_loading()
         self.assertEqual([track["name"] for track in window.project.tracks], ["My Song piano"])
         self.assertFalse(window.project.tracks[0].get("drum_reference"))
         self.assertIn("Added 1 stem of", window.statusBar().currentMessage())

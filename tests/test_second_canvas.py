@@ -110,9 +110,9 @@ class SecondCanvasTests(unittest.TestCase):
 
     # -- tests
 
-    def test_second_canvas_is_hidden_until_turned_on(self):
+    def test_second_canvas_is_open_at_launch_and_can_be_hidden(self):
         window = self.window
-        self.assertFalse(window.timeline2.isVisible())
+        self.assertTrue(window.timeline2.isVisible())
         self.open_second_canvas()
         self.assertEqual(self.clips(window.timeline2), {})
         self.assertEqual(sorted(self.clips(window.timeline)), [0, 1])
@@ -148,27 +148,37 @@ class SecondCanvasTests(unittest.TestCase):
         self.assertEqual([track["name"] for track in window.project.tracks], ["drums", "bass"])
         self.assertEqual(self.clips(window.timeline2), {})
 
-    def test_drag_whole_track_across_and_back(self):
+    def test_drag_one_block_across_and_back(self):
+        # A left-drag moves the one bar block under the mouse; the rest of
+        # the track stays on its canvas, at its time.
         window = self.window
         self.open_second_canvas()
         bass = self.clips(window.timeline)[1]
+        audio = self.track("bass")["_audio"]
         grab = QPointF(bass.pos().x() + 0.5 * PIXELS_PER_SECOND, bass.pos().y() + bass.rect().height() * 0.75)
         drop = QPointF(grab.x() + 1.0 * PIXELS_PER_SECOND, 60)
         self.drag(window.timeline, grab, window.timeline2, drop)
-        self.assertEqual(self.track("bass")["canvas"], 1)
-        self.assertAlmostEqual(self.track("bass")["start"], 1.0, places=2)
-        self.assertEqual(sorted(self.clips(window.timeline2)), [1])
-        self.assertEqual(sorted(self.clips(window.timeline)), [0])
+        piece = self.track("bass · bar 1")
+        self.assertEqual(piece["canvas"], 1)
+        self.assertAlmostEqual(piece["start"], 1.0, places=2)
+        self.assertAlmostEqual(piece["duration"], 2.0, places=3)
+        self.assertIs(piece["_audio"], audio)  # the same audio, not a copy
+        rest = self.track("bass")
+        self.assertNotIn("canvas", rest)
+        self.assertAlmostEqual(rest["start"], 2.0, places=3)  # bars 2-4 stay put
+        self.assertAlmostEqual(self.track("drums")["start"], 0.0)
+        self.assertAlmostEqual(self.track("drums")["duration"], 8.0)
 
         # And back, from the second canvas to the main one.
-        bass = self.clips(window.timeline2)[1]
-        grab = QPointF(bass.pos().x() + 0.5 * PIXELS_PER_SECOND, bass.pos().y() + bass.rect().height() * 0.75)
+        index = window.project.tracks.index(piece)
+        clip = self.clips(window.timeline2)[index]
+        grab = QPointF(clip.pos().x() + 0.5 * PIXELS_PER_SECOND, clip.pos().y() + clip.rect().height() * 0.75)
         drums = self.clips(window.timeline)[0]
         drop = QPointF(grab.x() - 1.0 * PIXELS_PER_SECOND, drums.pos().y() + drums.rect().height() + 20)
         self.drag(window.timeline2, grab, window.timeline, drop)
-        self.assertNotIn("canvas", self.track("bass"))
-        self.assertAlmostEqual(self.track("bass")["start"], 0.0, places=2)
-        self.assertEqual(sorted(self.clips(window.timeline)), [0, 1])
+        self.assertNotIn("canvas", piece)
+        self.assertAlmostEqual(piece["start"], 0.0, places=2)
+        self.assertEqual(self.clips(window.timeline2), {})
 
     def test_menu_command_save_and_reopen(self):
         window = self.window
@@ -317,20 +327,26 @@ class SecondCanvasTests(unittest.TestCase):
         shown = view.mapToScene(view.viewport().rect()).boundingRect()
         return shown.intersects(clip.sceneBoundingRect())
 
-    def test_no_empty_canvas_space(self):
+    def test_canvases_keep_their_size_when_stems_move(self):
         window = self.window
         self.open_second_canvas()
-        # Stacked: the second canvas is as tall as its one row plus one empty
-        # row (room to start a selection box), not 40 %.
-        window._move_track_to_canvas(1, 1, 30.0)  # far into the song
+        window._settle_canvases()
+        self.app.processEvents()
+        sizes = window.canvas_split.sizes()
+        heights = (window.timeline.height(), window.timeline2.height())
+        scroll = window.timeline.horizontalScrollBar().value()
+        window._move_track_to_canvas(1, 1)
+        window._move_track_to_canvas(0, 1)
+        window._move_track_to_canvas(1, 0)
         for _ in range(3):
             self.app.processEvents()
-        top, bottom = window.canvas_split.sizes()
-        self.assertLess(bottom, 230)
-        self.assertGreater(top, bottom)
-        self.assertTrue(self.visible_in(window.timeline2, 1))  # scrolled to it
+        self.assertEqual(window.canvas_split.sizes(), sizes)
+        self.assertEqual((window.timeline.height(), window.timeline2.height()), heights)
+        self.assertEqual(window.timeline.horizontalScrollBar().value(), scroll)
 
         # Side by side: narrow track headers, and the canvas starts at its clip.
+        window._move_track_to_canvas(0, 0)
+        window._move_track_to_canvas(1, 1, 30.0)  # far into the song
         window.timeline2.horizontalScrollBar().setValue(0)
         window.canvas_side_action.trigger()
         for _ in range(3):
@@ -338,62 +354,45 @@ class SecondCanvasTests(unittest.TestCase):
         self.assertEqual(window.headers2.width(), 150)
         self.assertTrue(self.visible_in(window.timeline2, 1))
 
-        # A second row on the second canvas makes it taller again when stacked.
-        window.canvas_stacked_action.trigger()
-        window._move_track_to_canvas(0, 1)
-        for _ in range(3):
-            self.app.processEvents()
-        self.assertGreater(window.canvas_split.sizes()[1], bottom + 50)
-
-
-    def test_short_bar_drags_from_its_play_button_and_click_still_plays(self):
-        # On a short placed bar the play button covers the middle; pressing
-        # there used to play the bar instead of picking it up.
+    def test_play_button_never_drags_and_a_click_plays(self):
+        # On a short placed bar the play button covers the middle. It is a
+        # button: pressing it and moving does not pick the bar up.
         window = self.window
         window._move_block(0, 2.0, 2.0, 2.5, False, 2, 1)  # bar 2 on its own row
         piece = self.track("drums · bar 2")
         clip = self.clips(window.timeline)[window.project.tracks.index(piece)]
         button = next(child for child in clip.childItems() if type(child).__name__ == "BarPlayButton")
         centre = clip.mapToScene(button.mapRectToParent(button.rect()).center())
+        top = clip.pos().y()
         played = []
         window.timeline.bar_play_requested.connect(lambda bar, track: played.append(bar))
         self.drag(window.timeline, centre, window.timeline, QPointF(centre.x() + PIXELS_PER_SECOND, centre.y()))
-        self.assertAlmostEqual(piece["start"], 3.5, places=2)
+        self.assertAlmostEqual(piece["start"], 2.5, places=2)
         self.assertEqual(played, [])
         # A plain click on it plays the bar and does not move anything.
-        clip = self.clips(window.timeline)[window.project.tracks.index(piece)]
-        button = next(child for child in clip.childItems() if type(child).__name__ == "BarPlayButton")
-        centre = clip.mapToScene(button.mapRectToParent(button.rect()).center())
-        top = clip.pos().y()
         self.drag(window.timeline, centre, window.timeline, centre)
         self.assertEqual(played, [1])
-        self.assertAlmostEqual(piece["start"], 3.5, places=2)
-        # The clip stays where it was: nothing left half-dragged.
+        self.assertAlmostEqual(piece["start"], 2.5, places=2)
         clip = self.clips(window.timeline)[window.project.tracks.index(piece)]
         self.assertAlmostEqual(clip.pos().y(), top, places=1)
         self.assertTrue(clip.isVisible())
 
-    def test_a_bar_play_button_plays_that_stem_only(self):
+    def test_a_bar_play_button_plays_that_stem_on_its_own(self):
         window = self.window
         engine = window.engine
-        state = {"playing": False}
-        at = int(2.5 * OUTPUT_RATE)  # drums 0.5, bass 0.1
-        with patch.object(type(engine), "playing", new_callable=PropertyMock) as playing, \
-                patch.object(engine, "play", lambda: state.update(playing=True)), \
-                patch.object(engine, "pause", lambda: state.update(playing=False)):
-            playing.side_effect = lambda: state["playing"]
+        engine.seek(7.0)
+        with patch.object(engine, "_ensure_stream", lambda: None):
             window.timeline.bar_play_requested.emit(1, 0)  # drums' bar 2 ▶
-            self.assertTrue(engine.playing)
-            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.5, places=3)  # drums only
-            window.timeline.bar_play_requested.emit(1, 1)  # bass's bar 2 ▶
-            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.1, places=3)  # bass only
-            # Space plays every stem on the canvas again.
-            window._hover_canvas = 0
-            window._toggle_transport()
-            self.assertIsNone(window._track_focus)
-            self.assertAlmostEqual(float(engine.render(at, 4)[0, 0]), 0.6, places=3)
-            window._pause()
-            self.assertNotIn("muted", window.project.tracks[1])  # own settings untouched
+            self.assertFalse(engine.playing)  # the transport is not used
+            self.assertEqual(engine.position, 7.0)
+            out = np.zeros((64, 2), np.float32)
+            engine._callback(out, 64, None, None)
+            self.assertAlmostEqual(float(out[0, 0]), 0.5, places=3)  # drums only
+            window.timeline.bar_play_requested.emit(1, 1)  # bass's bar 2 ▶ as well
+            engine._callback(out, 64, None, None)
+            self.assertAlmostEqual(float(out[0, 0]), 0.6, places=3)  # both together
+            window._stop_blocks()
+        self.assertNotIn("muted", window.project.tracks[1])  # own settings untouched
 
     def test_the_silent_canvas_does_not_scroll_while_the_other_plays(self):
         window = self.window
@@ -470,7 +469,7 @@ class SecondCanvasTests(unittest.TestCase):
 
     def test_tracks_can_go_back_before_bar_one(self):
         # Bar 1 is the first downbeat, here 3 s into the song. The beat grid
-        # used to start there, so a clip could never be dragged back to 0 s.
+        # used to start there, so a block could never be dragged back to 0 s.
         window = self.window
         window.project.bars = [3.0, 5.0, 7.0, 9.0, 11.0]
         drums = window.project.tracks[0]
@@ -483,13 +482,13 @@ class SecondCanvasTests(unittest.TestCase):
         clip = self.clips(view)[0]
         grab = QPointF(clip.pos().x() + 20, clip.pos().y() + clip.rect().height() * 0.75)
         self.drag(view, grab, view, QPointF(grab.x() - 3.0 * PIXELS_PER_SECOND - 60, grab.y()))
-        self.assertAlmostEqual(drums["start"], 0.0, places=3)
+        piece = self.track("drums · bar 1")
+        self.assertAlmostEqual(piece["start"], 0.0, places=3)
         # And to an intro beat.
-        clip = self.clips(view)[0]
+        clip = self.clips(view)[window.project.tracks.index(piece)]
         grab = QPointF(clip.pos().x() + 20, clip.pos().y() + clip.rect().height() * 0.75)
         self.drag(view, grab, view, QPointF(grab.x() + 1.0 * PIXELS_PER_SECOND + 4, grab.y()))
-        self.assertAlmostEqual(drums["start"], 1.0, places=3)
-
+        self.assertAlmostEqual(piece["start"], 1.0, places=3)
 
     def test_ctrl_drag_again_after_placing_on_a_track_or_canvas(self):
         # Bars are moved with Ctrl-drag. A placed bar is a selected piece of
@@ -637,7 +636,9 @@ class SecondCanvasTests(unittest.TestCase):
             self.app.processEvents()
         for _ in range(3):
             self.app.processEvents()
-        self.assertNotIn("canvas", self.track("bass"))
+        # The grabbed block lands on the main canvas; the rest stays on canvas 2.
+        self.assertNotIn("canvas", self.track("bass · bar 1"))
+        self.assertEqual(self.track("bass")["canvas"], 1)
 
     def test_left_drag_on_empty_space_selects_and_moves_together(self):
         window = self.window
@@ -645,17 +646,19 @@ class SecondCanvasTests(unittest.TestCase):
         view.resize(1200, 400)
         self.app.processEvents()
         drums, bass = self.clips(view)[0], self.clips(view)[1]
-        # From empty space below the tracks, up over both clips' start.
+        # From empty space below the tracks, up over both clips: picks every bar.
         below = QPointF(10.5 * PIXELS_PER_SECOND, bass.pos().y() + bass.rect().height() + 30)
         above = QPointF(0.5 * PIXELS_PER_SECOND, drums.pos().y() + 10)
         self.assertIsNone(view.clip_at(view.mapFromScene(below)))
-        self.drag(view, below, view, above, Qt.KeyboardModifier.ShiftModifier)  # Shift: whole tracks
-        self.assertEqual(window._selected_indices(), [0, 1])
-        # Dragging one of them moves both.
+        self.drag(view, below, view, above)
+        self.assertEqual(view.picks(), {0: {0, 1, 2, 3}, 1: {0, 1, 2, 3}})
+        # Dragging one picked block moves every picked block, one second later.
         point = QPointF(drums.pos().x() + 30, drums.pos().y() + drums.rect().height() * 0.75)
         self.drag(view, point, view, QPointF(point.x() + PIXELS_PER_SECOND, point.y()))
-        self.assertAlmostEqual(self.track("drums")["start"], 1.0, places=2)
-        self.assertAlmostEqual(self.track("bass")["start"], 1.0, places=2)
+        engine = window.engine
+        self.assertAlmostEqual(float(engine.render(int(3.5 * OUTPUT_RATE), 4)[0, 0]), 0.6, places=3)
+        self.assertAlmostEqual(float(engine.render(int(2.5 * OUTPUT_RATE), 4)[0, 0]), 0.1, places=3)
+        self.assertAlmostEqual(float(engine.render(int(0.5 * OUTPUT_RATE), 4)[0, 0]), 0.0, places=3)
         # A plain click on empty space still moves the playhead.
         seeks = []
         view.seek_requested.connect(seeks.append)
@@ -809,11 +812,11 @@ class SecondCanvasTests(unittest.TestCase):
         self.assertEqual(view.picks(), {})
 
     def test_dragged_selection_is_outlined_on_the_other_canvas(self):
+        # Picked bar blocks of two stems move to canvas 2 together.
         window = self.window
         self.open_second_canvas()
         view = window.timeline
-        for clip in self.clips(view).values():
-            clip.setSelected(True)
+        view.set_picks({0: {0}, 1: {0}})
         clip = self.clips(view)[0]
         start = view.mapFromScene(QPointF(clip.pos().x() + 30, clip.pos().y() + clip.rect().height() * 0.75))
         target = window.timeline2.viewport().mapToGlobal(QPoint(80, 60))
@@ -826,7 +829,7 @@ class SecondCanvasTests(unittest.TestCase):
             QApplication.sendEvent(view.viewport(), QMouseEvent(kind, QPointF(at), QPointF(view.viewport().mapToGlobal(at)),
                                                                 Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier))
             self.app.processEvents()
-        # Both dragged clips are outlined on canvas 2, one row apart.
+        # Both dragged blocks are outlined on canvas 2, one row apart.
         ghosts = window.timeline2._ghosts
         self.assertEqual(len(ghosts), 2)
         self.assertGreater(ghosts[1].rect().top(), ghosts[0].rect().top())
@@ -835,8 +838,10 @@ class SecondCanvasTests(unittest.TestCase):
         for _ in range(3):
             self.app.processEvents()
         self.assertEqual(window.timeline2._ghosts, [])
-        self.assertEqual(self.track("drums").get("canvas"), 1)
-        self.assertEqual(self.track("bass").get("canvas"), 1)
+        moved = sorted(track["name"] for track in window.project.tracks if track.get("canvas") == 1)
+        self.assertEqual(moved, ["bass · bar 1", "drums · bar 1"])
+        self.assertNotIn("canvas", self.track("drums"))  # the rest stays
+        self.assertNotIn("canvas", self.track("bass"))
 
 
 if __name__ == "__main__":

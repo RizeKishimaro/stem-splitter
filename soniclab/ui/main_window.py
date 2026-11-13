@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from soniclab.core.alignment import classify_onsets, matched_errors, nudged_alignment
 from soniclab.core.tempo import stretch as stretch_audio
 from soniclab.core.audio_engine import OUTPUT_RATE, AudioEngine
+from soniclab.core.audio_loader import AudioLoader, Loaded, decode as decode_audio
 from soniclab.core.downbeat_loop import downbeat_loop_region, loop_shortcut
 from soniclab.core.bar_export import (
     FORMATS,
@@ -112,6 +113,7 @@ from soniclab.ui.mixer import Mixer
 from soniclab.ui.stem_splitter import StemSplitterPanel
 from soniclab.ui.theme import DARK_STYLE, build_palette
 from soniclab.ui.visualizer import Visualizer
+from soniclab.ui import ui_trace
 from soniclab.ui.timeline import (
     FOLLOW_CENTER,
     FOLLOW_MODES,
@@ -171,6 +173,7 @@ class MainWindow(QMainWindow):
         self.beat_jobs = BeatJobQueue()
         self.onset_jobs = OnsetJobQueue()
         self.stem_jobs = StemJobQueue()
+        self.loader = AudioLoader()
         self._stem_names: dict[str, str] = {}
         self._stem_sources: dict[str, str] = {}
         self.current_path = None
@@ -184,7 +187,11 @@ class MainWindow(QMainWindow):
         self._active_canvas = 0
         self._hover_canvas = 0  # the canvas the mouse was over last; Play plays it
         self._track_focus: int | None = None  # a bar's ▶: hear only this track
+        # Stem blocks playing on their own, apart from the transport:
+        # (track, bar) -> the track they belong to, to notice edits.
+        self._preview_tracks: dict = {}
         self._lane_ids = 1
+        self._canvases_rebuilding = False
         self._gesture_before = None
         self._history_frozen = False
         self._record_started_at = 0.0
@@ -220,6 +227,11 @@ class MainWindow(QMainWindow):
         self._sync_transport_lamp()
         self._sync_capture()
         self._restore_view()
+        ui_trace.install(self)
+        # Canvas 2 is part of every session: open on each launch, whatever
+        # the last session ended with. The action shows the one instance.
+        self.second_canvas_action.setChecked(True)
+        self._canvases_settled = False
         self.statusBar().showMessage("Import audio to begin")
         self._build_stem_progress()
         rate = QLabel("44.1 kHz    Stereo    Snap beat")
@@ -248,7 +260,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self.stem_bar, 1)
         row.addWidget(self.stem_cancel)
         self.stem_banner.setVisible(False)
-        self.arrangement_layout.insertWidget(0, self.stem_banner)
+        # In the status bar, not above the canvases: showing and hiding it
+        # must not push the canvases down and back up.
+        row.setContentsMargins(8, 0, 4, 0)
+        self.stem_banner.setMaximumHeight(self.statusBar().sizeHint().height())
+        self.statusBar().addPermanentWidget(self.stem_banner)
 
     def _canvas_pair(self, canvas: int):
         headers = HeaderColumn(title="Tracks" if canvas == 0 else "Canvas 2")
@@ -823,7 +839,7 @@ class MainWindow(QMainWindow):
                 lambda seconds, canvas=timeline.canvas: self._seek_on_canvas(canvas, seconds)
             )
             timeline.track_selected.connect(lambda index, view=timeline: self._on_view_selected(view, index))
-            timeline.layout_changed.connect(self._rebuild_side_panels)
+            timeline.layout_changed.connect(self._canvas_layout_changed)
             timeline.bars_changed.connect(
                 lambda lines: self._set_bars(lines, "Bar line moved")
             )
@@ -919,6 +935,12 @@ class MainWindow(QMainWindow):
                 self._hover_canvas = 1
             elif watched is self.splitter or self.splitter.isAncestorOf(watched):
                 self._hover_canvas = 0
+        if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            # Esc cancels a stem block drag on either canvas; the block stays.
+            if any(view.cancel_block_drag() for view in self._timelines()):
+                self.statusBar().showMessage("Move cancelled", 2000)
+                return True
+            return False
         if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
             if QApplication.activeModalWidget() is not None:
                 return False
@@ -1037,21 +1059,20 @@ class MainWindow(QMainWindow):
         )
         self._import_paths(paths)
 
-    def _import_paths(self, paths, split: bool = True) -> None:
+    def _import_paths(self, paths, split: bool = True, note: str | None = None) -> None:
         """Add audio files as tracks, pick the drum track, queue analysis.
 
         A song that will be split is not added itself. Its stems are added
         now when an earlier split exists, otherwise when Demucs finishes.
+        Files are decoded on worker threads; the tracks arrive together, in
+        one edit and one canvas refresh, when the last one is ready. ``note``
+        replaces the status message shown when they do.
         """
-        paths = list(paths)
-        added = False
-        imported = []
+        items = []  # ("file", path, name, source) or ("stems", name, stems)
         splitting = []
         reused = []
         not_split = False
-        if paths:
-            self._remember_edit()
-        for path in paths:
+        for path in list(paths):
             name = os.path.splitext(os.path.basename(path))[0]
             source = os.path.abspath(path)
             wants_split = (
@@ -1059,52 +1080,73 @@ class MainWindow(QMainWindow):
                 and self.split_on_import_action.isChecked()
                 and not is_stem_name(name)
             )
+            if wants_split:
+                stems = existing_stems(source, default_stem_folder(self.current_path))
+                if stems is not None:
+                    items.append(("stems", name, stems))
+                    reused.append(name)
+                    continue
+                if self.stem_jobs.available:
+                    job = self.stem_jobs.submit(source, default_stem_folder(self.current_path))
+                    self._stem_names[job] = name
+                    self._stem_sources[job] = source
+                    splitting.append(name)
+                    continue
+                not_split = True
+            items.append(("file", path, name, source))
+        if splitting:
+            self._show_stem_progress(0.0)
+        files = []
+        for item in items:
+            if item[0] == "file":
+                files.append(item[1])
+            else:
+                files.extend(os.path.abspath(item[2][stem]) for stem in STEMS)
+        if not files:
+            return
+        self.statusBar().showMessage("Loading audio…")
+        self.loader.submit(
+            files, lambda results: self._finish_import(items, results, reused, not_split, bool(splitting), note)
+        )
+
+    def _finish_import(self, items, results, reused, not_split, splitting, note=None) -> None:
+        """Add decoded files as tracks: one edit, one refresh."""
+        ui_trace.mark(f"import {len(items)} item(s)")
+        added = False
+        imported = []
+        self._remember_edit()
+        for item in items:
             try:
-                if wants_split:
-                    stems = existing_stems(
-                        source, default_stem_folder(self.current_path)
-                    )
-                    if stems is not None:
-                        self._add_stem_tracks(name, stems)
-                        imported.extend(stems[stem] for stem in STEMS)
-                        reused.append(name)
-                        added = True
-                        continue
-                    if self.stem_jobs.available:
-                        job = self.stem_jobs.submit(
-                            source, default_stem_folder(self.current_path)
-                        )
-                        self._stem_names[job] = name
-                        self._stem_sources[job] = source
-                        splitting.append(name)
-                        continue
-                    not_split = True
-                audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
-                audio = AudioEngine.resample(audio, sample_rate)
+                if item[0] == "stems":
+                    _kind, name, stems = item
+                    self._add_stem_tracks(name, stems, results=results)
+                    imported.extend(stems[stem] for stem in STEMS)
+                    added = True
+                    continue
+                _kind, path, name, source = item
+                loaded = results.get(path)
+                if isinstance(loaded, BaseException):
+                    raise loaded
                 self.project.tracks.append(
                     {
                         "name": name,
                         "path": source,
                         "start": 0.0,
-                        "duration": len(audio) / OUTPUT_RATE,
-                        "_audio": audio,
+                        "duration": len(loaded.audio) / OUTPUT_RATE,
+                        **loaded.track_fields(),
                     }
                 )
-                index = self.engine.add_clip(audio, 0.0)
-                self._push_mix(index, self.project.tracks[-1])
                 added = True
                 imported.append(source)
             except Exception as exc:
-                QMessageBox.warning(self, "Could not import audio", f"{path}\n\n{exc}")
+                QMessageBox.warning(self, "Could not import audio", f"{item[1]}\n\n{exc}")
         drum = self._detect_drum_track() if added else None
-        if paths:
-            self._commit_edit()
+        self._commit_edit()
         if added:
             self._reload_engine()
         self._refresh_timeline()
-        if splitting:
-            self._show_stem_progress(0.0)
         if not (added and self.project.tracks):
+            self.statusBar().clearMessage()
             return
         self._select_track(len(self.project.tracks) - 1)
         self._queue_beat_sources(imported)
@@ -1118,23 +1160,37 @@ class MainWindow(QMainWindow):
         else:
             message = "Audio imported"
         message += f". Drum track: {lead}" if lead else ". No drum track found"
-        if not splitting:
+        if note:
+            self.statusBar().showMessage(note, 10000)
+        elif not splitting:
             self.statusBar().showMessage(message, 8000)
 
-    def _add_stem_tracks(self, name: str, stems: dict, order=STEMS) -> list[dict]:
-        """Append one track per stem in ``order``. Marks drums if none lead."""
+    def finish_loading(self) -> None:
+        """Wait for audio still being decoded and add it now."""
+        self.loader.wait()
+
+    def _add_stem_tracks(self, name: str, stems: dict, order=STEMS, results=None) -> list[dict]:
+        """Append one track per stem in ``order``. Marks drums if none lead.
+
+        ``results`` holds audio already decoded by the loader, by path;
+        without it the files are decoded here.
+        """
         added = []
         for stem in order:
             path = os.path.abspath(stems[stem])
-            audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
-            audio = AudioEngine.resample(audio, sample_rate)
+            loaded = results.get(path) if results is not None else None
+            if isinstance(loaded, BaseException):
+                raise loaded
+            if results is not None and loaded is None:
+                raise FileNotFoundError(path)
+            fields = loaded.track_fields() if isinstance(loaded, Loaded) else {"_audio": decode_audio(path)}
             added.append(
                 {
                     "name": f"{name} {stem}",
                     "path": path,
                     "start": 0.0,
-                    "duration": len(audio) / OUTPUT_RATE,
-                    "_audio": audio,
+                    "duration": len(fields["_audio"]) / OUTPUT_RATE,
+                    **fields,
                 }
             )
         self.project.tracks.extend(added)
@@ -1147,10 +1203,16 @@ class MainWindow(QMainWindow):
         self.stem_splitter_dock.raise_()
 
     def _add_split_stems(self, name: str, stems: dict, order: tuple) -> None:
-        """Add stems from the Stem Splitter panel as tracks, all starting at 0."""
+        """Add stems from the Stem Splitter panel as tracks, all starting at 0.
+        They are decoded off the GUI thread and added together."""
+        files = [os.path.abspath(stems[stem]) for stem in order]
+        self.statusBar().showMessage(f"Loading the stems of “{name}”…")
+        self.loader.submit(files, lambda results: self._finish_split_stems(name, stems, order, results))
+
+    def _finish_split_stems(self, name: str, stems: dict, order: tuple, results) -> None:
         self._remember_edit()
         try:
-            added = self._add_stem_tracks(name, stems, order)
+            added = self._add_stem_tracks(name, stems, order, results=results)
         except Exception as exc:
             self._gesture_before = None
             QMessageBox.warning(self, "Could not load stems", str(exc))
@@ -1209,9 +1271,6 @@ class MainWindow(QMainWindow):
     def _stems_finished(self, name: str, source: str | None, result) -> None:
         if result.status != STEMS_OK:
             cancelled = result.status == STEMS_CANCELLED
-            if source and not cancelled:
-                # Never leave the user with nothing: fall back to the song.
-                self._import_paths([source], split=False)
             text = (
                 f"Stem split of “{name}” cancelled"
                 if cancelled
@@ -1220,10 +1279,17 @@ class MainWindow(QMainWindow):
                 )
             )
             self.statusBar().showMessage(text, 10000)
+            if source and not cancelled:
+                # Never leave the user with nothing: fall back to the song.
+                self._import_paths([source], split=False, note=text)
             return
+        files = [os.path.abspath(result.stems[stem]) for stem in STEMS]
+        self.loader.submit(files, lambda results: self._finish_stems(name, result, results))
+
+    def _finish_stems(self, name: str, result, results) -> None:
         self._remember_edit()
         try:
-            added = self._add_stem_tracks(name, result.stems)
+            added = self._add_stem_tracks(name, result.stems, results=results)
         except Exception as exc:
             self._gesture_before = None
             QMessageBox.warning(self, "Could not load stems", str(exc))
@@ -1316,21 +1382,26 @@ class MainWindow(QMainWindow):
             self.second_canvas_action.blockSignals(True)
             self.second_canvas_action.setChecked(True)
             self.second_canvas_action.blockSignals(False)
-        for timeline in self._timelines():
-            timeline.rebuild(
-                self.project.tracks,
-                self._clip_moved,
-                bpm,
-                time_signature,
-                bars,
-            )
-        if (
-            self.splitter2.isVisible()
-            and not self.canvas_side_by_side
-            and self._second_canvas_rows() != self._sized_rows
-        ):
-            self._size_canvases()  # rows came or went: fit the second canvas again
+        self._canvases_rebuilding = True
+        try:
+            for timeline in self._timelines():
+                timeline.rebuild(
+                    self.project.tracks,
+                    self._clip_moved,
+                    bpm,
+                    time_signature,
+                    bars,
+                )
+        finally:
+            self._canvases_rebuilding = False
+        self._rebuild_side_panels()
         self._sync_bpm_field()
+
+    def _canvas_layout_changed(self) -> None:
+        # While _refresh_timeline rebuilds both canvases it lays the panels
+        # out once at the end, not once per canvas.
+        if not self._canvases_rebuilding:
+            self._rebuild_side_panels()
 
     def _rebuild_side_panels(self):
         tracks = self.project.tracks
@@ -1450,14 +1521,21 @@ class MainWindow(QMainWindow):
         self.headers2.set_playing(playing and self._canvas_focus == 1)
 
     def _reload_engine(self):
-        self.engine.clear_clips()
-        for index, track in enumerate(self.project.tracks):
-            audio = track.get("_audio")
-            if audio is None:
-                audio = np.zeros((1, 2), dtype=np.float32)
-                track["_audio"] = audio
-            self.engine.add_clip(audio, float(track.get("start", 0.0)))
-            self._push_mix(index, track)
+        # One step for the audio thread: playback never hears the clips
+        # half reloaded, e.g. while importing during playback.
+        with self.engine.batch():
+            self.engine.clear_clips()
+            for index, track in enumerate(self.project.tracks):
+                audio = track.get("_audio")
+                if audio is None:
+                    audio = np.zeros((1, 2), dtype=np.float32)
+                    track["_audio"] = audio
+                self.engine.add_clip(audio, float(track.get("start", 0.0)))
+                self._push_mix(index, track)
+            if self._preview_tracks:
+                self._follow_preview_tracks()
+        if self._preview_tracks:
+            QTimer.singleShot(0, self._prune_previews)  # after the canvases redraw
 
     def _set_session_title(self):
         name = (self.project.name or "Untitled").strip() or "Untitled"
@@ -1525,7 +1603,8 @@ class MainWindow(QMainWindow):
         self._last_frame = now
         shown = self._update_playheads()
         playing = shown[0]
-        if not playing:
+        previews = self._sync_previews() if (self._preview_tracks or self.engine.previews()) else {}
+        if not playing and not previews:
             self.frame_timer.stop()
             self._last_frame = 0.0
         self._frames += 1
@@ -1556,7 +1635,7 @@ class MainWindow(QMainWindow):
         secs = seconds % 60
         self.position_label.setText(f"{minutes:02d}:{secs:06.3f}")
         self.musical_label.setText(self._musical_position(seconds))
-        if playing and not self.frame_timer.isActive():
+        if (playing or self._preview_tracks) and not self.frame_timer.isActive():
             self.frame_timer.start()
         self._sync_transport_lamp()
         self._sync_capture()
@@ -1566,6 +1645,7 @@ class MainWindow(QMainWindow):
         self._poll_beats()
         self._poll_onsets()
         self._poll_stems()
+        self.loader.poll()
         if self.engine.playing:
             self.stem_splitter.stop_preview()  # one sound source at a time
 
@@ -1615,6 +1695,9 @@ class MainWindow(QMainWindow):
         self._sync_canvas_play_buttons()
 
     def _stop(self):
+        # Stop is the panic button: the song and every stem block.
+        self.engine.preview_stop_all()
+        self._sync_previews()
         self.engine.stop()
         self._sync_transport_lamp()
         self._sync_canvas_play_buttons()
@@ -2252,6 +2335,7 @@ class MainWindow(QMainWindow):
 
     def _move_track_to_canvas(self, index: int, canvas: int, start: float | None = None) -> None:
         """Put a whole track (and any track sharing its row) on ``canvas``."""
+        ui_trace.mark(f"move track {index} to canvas {canvas}")
         tracks = self.project.tracks
         if not (0 <= index < len(tracks)):
             return
@@ -2272,7 +2356,10 @@ class MainWindow(QMainWindow):
         self._select_track(index)
         where = "the second canvas" if canvas else "the main canvas"
         self.statusBar().showMessage(f"Moved “{tracks[index].get('name', 'Track')}” to {where}", 3000)
-        self._reveal_track(index)
+        if self.canvas_side_by_side:
+            # Side by side the canvases scroll apart; show where it landed.
+            # Stacked they share one stretch of time, so nothing scrolls.
+            self._reveal_track(index)
 
     def _move_track_to_row(self, index: int, view, display_row: int) -> None:
         """Put one clip on another row of its canvas: it joins the clips on
@@ -2352,6 +2439,7 @@ class MainWindow(QMainWindow):
         )
 
     def _move_blocks(self, source, blocks, grabbed: int, shift: float, canvas: int, target_row: int) -> None:
+        ui_trace.mark(f"move {len(blocks)} block(s) to canvas {canvas}")
         """Picked bars dragged together. Each bar is cut out of its track as
         a piece of its own (a piece that already is one bar just moves),
         moved by ``shift`` seconds onto ``canvas``. The grabbed bar lands on
@@ -2501,6 +2589,23 @@ class MainWindow(QMainWindow):
         bar = view.bar_under(pos)
         clip = view.clip_at(pos)
         menu = QMenu(self)
+        block = view.block_at(pos)
+        states = self.engine.previews()
+        if block is not None:
+            state = states.get(block)
+            playing = state is not None and state[0]
+            menu.addAction(
+                f"{'Pause' if playing else 'Play'} This Block on Its Own",
+                lambda key=block: self._toggle_block(*key),
+            )
+            if state is not None:
+                menu.addAction("Stop This Block", lambda key=block: self._stop_block(key))
+        if any(view.picks() for view in self._timelines()):
+            menu.addAction("Play Picked Blocks Together", self._play_picked_blocks)
+        if states:
+            menu.addAction("Stop All Blocks", self._stop_blocks)
+        if menu.actions():
+            menu.addSeparator()
         if bar >= 0:
             self._add_bar_actions(menu, bar)
         if clip is None:
@@ -2925,6 +3030,7 @@ class MainWindow(QMainWindow):
         ``join``: it was dropped on another track's row, and joins that row
         (``insert_at`` is the row's first track).
         """
+        ui_trace.mark(f"move bar {bar + 1} of track {index}" + ("" if canvas is None else f" to canvas {canvas}"))
         host = (
             self.project.tracks[insert_at]
             if join and 0 <= insert_at < len(self.project.tracks) and insert_at != index
@@ -3630,27 +3736,126 @@ class MainWindow(QMainWindow):
     def _play_bar(self, index: int, track: int = -1) -> None:
         """Play one bar. From a bar's ▶ on a track (``track`` >= 0) only that
         track (that stem) is heard; from a menu, the whole canvas in focus."""
+        if 0 <= track < len(self.project.tracks):
+            self._toggle_block(track, index)
+            return
         bounds = self._bar_bounds(index)
         if bounds is None:
             return
         start, end = bounds
-        tracks = self.project.tracks
         self._engage_loop(start, end)
-        if 0 <= track < len(tracks):
-            canvas = track_canvas(tracks[track])
-            self._track_focus = track
-            self._active_canvas = canvas
-            self._canvas_positions[canvas] = start
-            self._set_canvas_focus(canvas)  # also applies the track focus
-            self.engine.seek(start)
-            if not self.engine.playing:
-                self._play(keep_focus=True)
-            name = tracks[track].get("name", "Track")
-            self.statusBar().showMessage(f"Playing bar {index + 1} of “{name}” only", 4000)
-            return
         self.engine.seek(start)
         self._play_hovered()
         self.statusBar().showMessage(f"Playing bar {index + 1}", 4000)
+
+    # -- stem blocks played on their own -------------------------------------
+    # A block's ▶ plays that bar of that stem as its own voice in the engine,
+    # mixed with anything else playing. The transport, its playhead, the
+    # loop and the scroll position are left alone; the playhead is hidden
+    # while only blocks play.
+
+    def _toggle_block(self, track: int, bar: int) -> None:
+        key = (int(track), int(bar))
+        state = self.engine.previews().get(key)
+        if state is not None and state[0]:
+            self.engine.preview_pause(key)
+            self._sync_previews()
+            return
+        self._start_blocks([key])
+
+    def _start_blocks(self, keys) -> None:
+        """Start (or resume) blocks together, on the same audio sample."""
+        blocks = []
+        for track, bar in keys:
+            times = self._view_for(track).block_times(track, bar)
+            if times is None:
+                continue
+            blocks.append(((track, bar), track, times[0], times[1]))
+            self._preview_tracks[(track, bar)] = (self.project.tracks[track], times)
+        if not blocks:
+            return
+        try:
+            self.engine.preview_play(blocks)
+        except Exception as exc:
+            for key, *_rest in blocks:
+                self.engine.preview_stop(key)
+            self._sync_previews()
+            QMessageBox.critical(self, "Audio output error", f"Could not play the block.\n\n{exc}")
+            return
+        self.stem_splitter.stop_preview()  # the splitter's own player is separate
+        self._sync_previews()
+        if not self.frame_timer.isActive():
+            self.frame_timer.start()
+        if len(blocks) == 1:
+            (track, bar), *_rest = blocks[0]
+            name = self.project.tracks[track].get("name", "Track")
+            self.statusBar().showMessage(f"Playing bar {bar + 1} of “{name}”", 3000)
+        else:
+            self.statusBar().showMessage(f"Playing {len(blocks)} blocks together", 3000)
+
+    def _stop_block(self, key) -> None:
+        self.engine.preview_stop(key)
+        self._sync_previews()
+
+    def _stop_blocks(self) -> None:
+        self.engine.preview_stop_all()
+        self._sync_previews()
+
+    def _play_picked_blocks(self) -> None:
+        keys = [
+            (track, bar)
+            for view in self._timelines()
+            for track, bars in sorted(view.picks().items())
+            for bar in sorted(bars)
+        ]
+        self._start_blocks(keys)
+
+    def _sync_previews(self, states: dict | None = None) -> dict:
+        """Buttons, tints and cursors from the engine's own voice state."""
+        states = self.engine.previews() if states is None else states
+        for key in [key for key in self._preview_tracks if key not in states]:
+            del self._preview_tracks[key]
+        shown = self.engine.playing or not states
+        for timeline in self._timelines():
+            timeline.set_previews(states)
+            timeline.set_playhead_visible(shown)
+        return states
+
+    def _follow_preview_tracks(self) -> None:
+        """Tracks were inserted or reordered: keep each block voice on its
+        own track (found by identity, not index), or stop it if it is gone.
+        Runs in the same engine batch as the reload."""
+        where = {id(track): index for index, track in enumerate(self.project.tracks)}
+        changes = {}
+        for key, (track, times) in list(self._preview_tracks.items()):
+            index = where.get(id(track))
+            if index is None:
+                self.engine.preview_stop(key)
+                del self._preview_tracks[key]
+            elif index != key[0]:
+                new = (index, key[1])
+                changes[key] = (new, index)
+        if changes:
+            self.engine.preview_retarget(changes)
+            self._preview_tracks = {
+                changes.get(key, (key,))[0]: value for key, value in self._preview_tracks.items()
+            }
+
+    def _prune_previews(self) -> None:
+        """After an edit: stop voices whose track or block moved or went."""
+        tracks = self.project.tracks
+        for key, (track, times) in list(self._preview_tracks.items()):
+            index, bar = key
+            current = self._view_for(index).block_times(index, bar) if index < len(tracks) else None
+            if (
+                index >= len(tracks)
+                or tracks[index] is not track
+                or current is None
+                or abs(current[0] - times[0]) > 1e-3
+                or abs(current[1] - times[1]) > 1e-3
+            ):
+                self.engine.preview_stop(key)
+        self._sync_previews()
 
     def _loop_bar(self, index: int) -> None:
         bounds = self._bar_bounds(index)
@@ -4183,6 +4388,22 @@ class MainWindow(QMainWindow):
             "The metronome, effects, and the sample library are not available yet.",
         )
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._canvases_settled:
+            # Sizes are only known once the window is on screen.
+            self._canvases_settled = True
+            QTimer.singleShot(0, self._settle_canvases)
+
+    def _settle_canvases(self) -> None:
+        if not self.splitter2.isVisible():
+            return
+        self._size_canvases()
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            state = QSettings("SonicLab", "SonicLab").value("view/canvasSplit")
+            if state is not None:
+                self.canvas_split.restoreState(state)
+
     def closeEvent(self, event):
         app = QApplication.instance()
         if app is not None:
@@ -4193,12 +4414,15 @@ class MainWindow(QMainWindow):
         self.beat_jobs.cancel()
         self.onset_jobs.cancel()
         self.stem_jobs.cancel()
+        self.loader.shutdown()
         self.stem_splitter.shutdown()
         self.visualizer.set_active(False)
         self.recorder.stop_stream()
         if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
             settings = QSettings("SonicLab", "SonicLab")
             settings.setValue("windowState", self.saveState())
+            if self.splitter2.isVisible():
+                settings.setValue("view/canvasSplit", self.canvas_split.saveState())
             settings.setValue("visualizer", self.visualizer.state())
         self.engine.close()
         super().closeEvent(event)

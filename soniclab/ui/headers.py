@@ -30,6 +30,7 @@ class TrackHeader(QFrame):
     def __init__(self, index: int, track: dict, height: int):
         super().__init__()
         self.index = index
+        self.reuse_key = None  # set by HeaderColumn: what this header shows
         self._name = track.get("name", f"Track {index + 1}")
         self._drag = False
         self._drag_y = 0.0
@@ -235,6 +236,7 @@ class HeaderColumn(QWidget):
         self.title = title
         self._playing = False
         self.play_button: QToolButton | None = None
+        self._corner: QFrame | None = None
         self.setObjectName("headerPane")
         self.setMinimumWidth(208)
         self.setMaximumWidth(340)
@@ -257,13 +259,58 @@ class HeaderColumn(QWidget):
         self.rebuild([], [], -1)
 
     def rebuild(self, tracks, heights, selected: int):
+        """Lay out one header per track.
+
+        A header whose track, index, name and height are unchanged is kept
+        as it is; only new or changed ones are made. Painting is held until
+        the column is complete, so it never shows half rebuilt.
+        """
+        self.body.setUpdatesEnabled(False)
+        try:
+            self._relayout(tracks, heights, selected)
+        finally:
+            self.body.setUpdatesEnabled(True)
+
+    def _relayout(self, tracks, heights, selected: int):
+        kept = {header.reuse_key: header for header in self._headers}
         while self.column.count():
-            item = self.column.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+            self.column.takeAt(0)  # widgets stay; spacers go
         self._headers = []
+        if self._corner is None:
+            self._corner = self._build_corner()
+        self.column.addWidget(self._corner)
+        for index, track in enumerate(tracks):
+            height = heights[index] if index < len(heights) else TRACK_HEIGHT
+            key = (id(track), index, track.get("name", f"Track {index + 1}"), int(height))
+            header = kept.pop(key, None)
+            if header is None:
+                header = self._new_header(index, track, height)
+                header.reuse_key = key
+            else:
+                header._apply(track)
+            header.set_selected(index == selected)
+            self.column.addWidget(header)
+            self._headers.append(header)
+        for header in kept.values():
+            header.hide()
+            header.deleteLater()
+        self.column.addStretch(1)
+
+    def _new_header(self, index: int, track: dict, height: int) -> "TrackHeader":
+        header = TrackHeader(index, track, height)
+        header.selected.connect(self.selected)
+        header.gain_changed.connect(self.gain_changed)
+        header.pan_changed.connect(self.pan_changed)
+        header.mute_changed.connect(self.mute_changed)
+        header.solo_changed.connect(self.solo_changed)
+        header.resize_committed.connect(self.resize_committed)
+        header.unavailable.connect(self.unavailable)
+        header.arm_changed.connect(self.arm_changed)
+        header.edit_finished.connect(self.edit_finished)
+        header.rename_requested.connect(self.rename_requested)
+        return header
+
+    def _build_corner(self) -> QFrame:
         corner = QFrame()
         corner.setObjectName("rulerCorner")
         corner.setFixedHeight(RULER_HEIGHT)
@@ -279,24 +326,7 @@ class HeaderColumn(QWidget):
         self.play_button.clicked.connect(lambda _checked=False: self.play_requested.emit())
         corner_layout.addWidget(self.play_button)
         self.set_playing(self._playing)
-        self.column.addWidget(corner)
-        for index, track in enumerate(tracks):
-            height = heights[index] if index < len(heights) else TRACK_HEIGHT
-            header = TrackHeader(index, track, height)
-            header.set_selected(index == selected)
-            header.selected.connect(self.selected)
-            header.gain_changed.connect(self.gain_changed)
-            header.pan_changed.connect(self.pan_changed)
-            header.mute_changed.connect(self.mute_changed)
-            header.solo_changed.connect(self.solo_changed)
-            header.resize_committed.connect(self.resize_committed)
-            header.unavailable.connect(self.unavailable)
-            header.arm_changed.connect(self.arm_changed)
-            header.edit_finished.connect(self.edit_finished)
-            header.rename_requested.connect(self.rename_requested)
-            self.column.addWidget(header)
-            self._headers.append(header)
-        self.column.addStretch(1)
+        return corner
 
     def set_playing(self, playing: bool) -> None:
         """Show whether this canvas is playing on its own."""

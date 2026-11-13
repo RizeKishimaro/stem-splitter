@@ -108,6 +108,7 @@ class WindowTests(unittest.TestCase):
     def test_import_marks_drums_and_others_follow(self):
         window = self.window
         window._import_paths([self.paths["bass.wav"], self.paths["drums.wav"]])
+        window.finish_loading()
         bass, drums = window.project.tracks
         self.assertTrue(drums.get("drum_reference"))
         self.assertEqual(self.jobs.submitted, ["drums.wav", "bass.wav"])
@@ -122,6 +123,7 @@ class WindowTests(unittest.TestCase):
     def test_toggle_drum_track(self):
         window = self.window
         window._import_paths([self.paths["bass.wav"], self.paths["drums.wav"]])
+        window.finish_loading()
         window._select_track(0)
         window._toggle_drum_track()
         self.assertTrue(window.project.tracks[0].get("drum_reference"))
@@ -146,6 +148,7 @@ class WindowTests(unittest.TestCase):
         )
         self.assertTrue(window.eventFilter(window.timeline.viewport(), event))
         self.app.processEvents()
+        window.finish_loading()
         self.assertEqual([track["name"] for track in window.project.tracks], ["drums"])
 
 

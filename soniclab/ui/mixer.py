@@ -43,6 +43,7 @@ class ChannelStrip(QFrame):
     def __init__(self, index: int, track: dict):
         super().__init__()
         self.index = index
+        self.reuse_key = None  # set by Mixer: what this strip shows
         self.setObjectName("mixerStrip")
         self.setFixedWidth(96)
         self._master = index < 0
@@ -67,7 +68,8 @@ class ChannelStrip(QFrame):
             peak = QLabel("Live")
             peak.setToolTip("Master output. The bar is the live mix peak.")
         else:
-            peak = QLabel(f"File {file_peak_db(track.get('_audio'))}")
+            known = track.get("_peak_db")  # measured while loading
+            peak = QLabel(f"File {known if known is not None else file_peak_db(track.get('_audio'))}")
             peak.setToolTip("File peak. The bar beside the fader is the live track level.")
         peak.setObjectName("dim")
         layout.addWidget(peak)
@@ -172,6 +174,7 @@ class Mixer(QWidget):
         super().__init__(parent)
         self._strips: list[ChannelStrip] = []
         self._master: ChannelStrip | None = None
+        self._empty: QLabel | None = None
         self._master_gain = 1.0
         self._master_muted = False
         outer = QVBoxLayout(self)
@@ -189,28 +192,52 @@ class Mixer(QWidget):
         self.rebuild([], -1)
 
     def rebuild(self, tracks, selected: int):
+        """One strip per track, then the master.
+
+        A strip whose track, index and name are unchanged is kept (with its
+        file peak, which is slow to measure); only new or changed ones are
+        made. Painting is held until the row is complete.
+        """
+        self.body.setUpdatesEnabled(False)
+        try:
+            self._relayout(tracks, selected)
+        finally:
+            self.body.setUpdatesEnabled(True)
+
+    def _relayout(self, tracks, selected: int):
+        kept = {strip.reuse_key: strip for strip in self._strips}
         while self.row.count():
-            item = self.row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+            self.row.takeAt(0)  # widgets stay; spacers go
         self._strips = []
-        self._master = None
-        if not tracks:
-            empty = QLabel("Import audio to add channel strips.")
-            empty.setObjectName("dim")
-            empty.setContentsMargins(12, 8, 12, 8)
-            self.row.addWidget(empty)
+        if self._empty is None:
+            self._empty = QLabel("Import audio to add channel strips.")
+            self._empty.setObjectName("dim")
+            self._empty.setContentsMargins(12, 8, 12, 8)
+        self._empty.setVisible(not tracks)
+        self.row.addWidget(self._empty)
         for index, track in enumerate(tracks):
-            strip = self._bind_strip(ChannelStrip(index, track), selected)
+            key = (id(track), index, track.get("name", f"Track {index + 1}"))
+            strip = kept.pop(key, None)
+            if strip is None:
+                strip = self._bind_strip(ChannelStrip(index, track), selected)
+                strip.reuse_key = key
+            else:
+                strip.set_gain(float(track.get("gain", 1.0)))
+                strip.set_pan(float(track.get("pan", 0.0)))
+                strip.set_muted(bool(track.get("muted", False)))
+                strip.set_solo(bool(track.get("solo", False)))
+                strip.set_selected(index == selected)
             self.row.addWidget(strip)
             self._strips.append(strip)
-        master = ChannelStrip(-1, {"name": "Master", "gain": self._master_gain, "muted": self._master_muted})
-        master.set_muted(self._master_muted)
-        self._bind_strip(master, -2)
-        self._master = master
-        self.row.addWidget(master)
+        for strip in kept.values():
+            strip.hide()
+            strip.deleteLater()
+        if self._master is None:
+            master = ChannelStrip(-1, {"name": "Master", "gain": self._master_gain, "muted": self._master_muted})
+            self._bind_strip(master, -2)
+            self._master = master
+        self._master.set_muted(self._master_muted)
+        self.row.addWidget(self._master)
         self.row.addStretch(1)
 
     def _bind_strip(self, strip: ChannelStrip, selected: int) -> ChannelStrip:

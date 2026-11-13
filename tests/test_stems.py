@@ -207,11 +207,13 @@ class WindowTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(0.02)
         self.assertFalse(self.window._stem_names)
+        self.window.finish_loading()
 
     def test_imported_song_becomes_stems_led_by_drums(self):
         window = self.window
         song = str(_song(self.root, "My Song.wav"))
         window._import_paths([song])
+        window.finish_loading()
         self.assertTrue(window.stem_banner.isVisible())
         self.assertIn("Splitting “My Song” into drums, bass, other and vocals", window.stem_label.text())
         # The full song is never added while it splits.
@@ -230,6 +232,7 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(window.project.tracks, [])
         # A second import reuses the stems at once, without Demucs.
         window._import_paths([song])
+        window.finish_loading()
         self.assertFalse(window._stem_names)
         self.assertEqual(len(window.project.tracks), 4)
         self.assertIn("Loaded saved stems for “My Song”", window.statusBar().currentMessage())
@@ -239,6 +242,7 @@ class WindowTests(unittest.TestCase):
         window.stem_jobs = StemJobQueue(StemSplitter(self.root / "missing" / "python"))
         window.stem_jobs._splitter.python = Path(sys.executable)  # available, but not Demucs
         window._import_paths([str(_song(self.root, "Broken.wav"))])
+        window.finish_loading()
         self._wait_for_split()
         self.assertEqual([track["name"] for track in window.project.tracks], ["Broken"])
         self.assertIn("Could not split “Broken”", window.statusBar().currentMessage())
@@ -246,9 +250,11 @@ class WindowTests(unittest.TestCase):
     def test_stem_files_and_the_switch_skip_demucs(self):
         window = self.window
         window._import_paths([str(_song(self.root, "drums.wav"))])
+        window.finish_loading()
         self.assertFalse(window._stem_names)
         window.split_on_import_action.setChecked(False)
         window._import_paths([str(_song(self.root, "Another Song.wav"))])
+        window.finish_loading()
         self.assertFalse(window._stem_names)
         self.assertEqual(len(window.project.tracks), 2)
 

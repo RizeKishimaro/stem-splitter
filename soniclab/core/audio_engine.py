@@ -12,6 +12,61 @@ BLOCK_SIZE = 512
 RING_SECONDS = 2
 # Blocks of playback history kept for drawing the playhead (about 0.2 s).
 HEARD_BLOCKS = 16
+# Preview voices: the limiter keeps their sum under this peak, then lets go
+# over about RELEASE_SECONDS. It only runs while a voice is playing, so the
+# song itself plays and exports exactly as before.
+LIMIT_CEILING = 0.98
+LIMIT_RELEASE_SECONDS = 0.25
+
+
+class _Voice:
+    """One stem block played on its own, apart from the transport."""
+
+    __slots__ = ("key", "clip", "start", "end", "cursor", "playing")
+
+    def __init__(self, key, clip: int, start: int, end: int):
+        self.key = key
+        self.clip = int(clip)
+        self.start = int(start)
+        self.end = int(end)
+        self.cursor = int(start)
+        self.playing = True
+
+def mix_clip_into(out, clip, start) -> float:
+    """Add one clip's sound for ``len(out)`` frames from arrangement frame
+    ``start`` into ``out``, with its gain, pan and fades. Mute and solo are
+    the caller's business. Returns the peak it added."""
+    frames = len(out)
+    audio = clip["audio"]
+    offset = int(clip.get("offset", 0))
+    length = int(clip.get("length", max(0, len(audio) - offset)))
+    gain = float(clip["gain"]) * float(clip.get("clip_gain", 1.0))
+    pan = clip["pan"]
+    left_gain = gain * (1.0 - max(0.0, pan))
+    right_gain = gain * (1.0 + min(0.0, pan))
+    fade_in = int(clip.get("fade_in", 0))
+    fade_out = int(clip.get("fade_out", 0))
+    file_start = offset + int(start) - clip["start"]
+    overlap_start = max(offset, file_start)
+    overlap_end = min(len(audio), offset + max(0, length), file_start + frames)
+    if overlap_end <= overlap_start:
+        return 0.0
+    dest = overlap_start - file_start
+    piece_l = audio[overlap_start:overlap_end, 0] * left_gain
+    piece_r = audio[overlap_start:overlap_end, 1] * right_gain
+    if fade_in or fade_out:
+        rel = np.arange(overlap_start - offset, overlap_end - offset, dtype=np.float32)
+        env = np.ones(rel.shape, dtype=np.float32)
+        if fade_in > 0:
+            env *= np.clip(rel / float(fade_in), 0.0, 1.0)
+        if fade_out > 0:
+            env *= np.clip((length - rel) / float(fade_out), 0.0, 1.0)
+        piece_l = piece_l * env
+        piece_r = piece_r * env
+    out[dest : dest + len(piece_l), 0] += piece_l
+    out[dest : dest + len(piece_r), 1] += piece_r
+    return float(max(np.max(np.abs(piece_l)), np.max(np.abs(piece_r))))
+
 
 def render_clips(clips, start, frames, output_gain=1.0, master_muted=False, include=None):
     """Mix ``frames`` samples from arrangement frame ``start``, offline.
@@ -30,34 +85,7 @@ def render_clips(clips, start, frames, output_gain=1.0, master_muted=False, incl
             continue
         if clip["muted"] or (soloed and not clip.get("solo")):
             continue
-        audio = clip["audio"]
-        offset = int(clip.get("offset", 0))
-        length = int(clip.get("length", max(0, len(audio) - offset)))
-        gain = float(clip["gain"]) * float(clip.get("clip_gain", 1.0))
-        pan = clip["pan"]
-        left_gain = gain * (1.0 - max(0.0, pan))
-        right_gain = gain * (1.0 + min(0.0, pan))
-        fade_in = int(clip.get("fade_in", 0))
-        fade_out = int(clip.get("fade_out", 0))
-        file_start = offset + start - clip["start"]
-        overlap_start = max(offset, file_start)
-        overlap_end = min(len(audio), offset + max(0, length), file_start + frames)
-        if overlap_end <= overlap_start:
-            continue
-        dest = overlap_start - file_start
-        piece_l = audio[overlap_start:overlap_end, 0] * left_gain
-        piece_r = audio[overlap_start:overlap_end, 1] * right_gain
-        if fade_in or fade_out:
-            rel = np.arange(overlap_start - offset, overlap_end - offset, dtype=np.float32)
-            env = np.ones(rel.shape, dtype=np.float32)
-            if fade_in > 0:
-                env *= np.clip(rel / float(fade_in), 0.0, 1.0)
-            if fade_out > 0:
-                env *= np.clip((length - rel) / float(fade_out), 0.0, 1.0)
-            piece_l = piece_l * env
-            piece_r = piece_r * env
-        out[dest : dest + len(piece_l), 0] += piece_l
-        out[dest : dest + len(piece_r), 1] += piece_r
+        mix_clip_into(out, clip, start)
     if output_gain != 1.0:
         out *= output_gain
     if master_muted:
@@ -96,6 +124,12 @@ class AudioEngine:
         # entry per recent block. The callback swaps in a new tuple, so the
         # UI reads it without the lock and never waits on the audio thread.
         self._heard: tuple = ()
+        # Preview voices by key, mixed on top of the transport. The UI reads
+        # ``_preview_view`` (key -> (playing, start, end, frame, sounds at)),
+        # a tuple swapped in whole, so it never waits on the audio thread.
+        self._voices: dict = {}
+        self._preview_view: dict = {}
+        self._limit_gain = 1.0
 
     @property
     def position(self):
@@ -177,11 +211,20 @@ class AudioEngine:
             self._track_peaks.append(0.0)
             return len(self._clips) - 1
 
+    def batch(self):
+        """Hold the audio thread off while several calls change the clips,
+        so a block is never mixed from half the changes (a clip missing, or
+        heard before its mute or gain is set). Keep the work inside short."""
+        return self._lock
+
     def clear_clips(self) -> None:
         """Remove every clip. Transport position and loop are unchanged."""
         self.replace_clips([])
 
     def replace_clips(self, clips):
+        # Preview voices find their clip by index each block. Clips that
+        # come back at the same index keep playing; a voice whose clip is
+        # gone ends on the next block.
         with self._lock:
             self._clips = clips
             self._track_rings = [StereoRing(OUTPUT_RATE * RING_SECONDS) for _ in clips]
@@ -320,73 +363,26 @@ class AudioEngine:
     def _callback(self, outdata, frames, time_info, status):
         outdata.fill(0)
         with self._lock:
-            if not self._playing:
+            playing = self._playing
+            if not playing and not self._voices:
                 return
             frames = int(frames)
             if frames <= 0:
                 return
-            position = self._position
-            clips = list(self._clips)
-            soloed = any(clip.get("solo") for clip in clips)
-            capture = self._capture_enabled and frames <= len(self._scratch)
-            segments, next_position = self._playback_segments(position, frames)
-            self._heard = (self._heard + ((self._sounds_at(time_info), tuple(segments)),))[-HEARD_BLOCKS:]
-            for index, clip in enumerate(clips):
-                heard = not clip["muted"] and not (soloed and not clip.get("solo"))
-                if not heard:
-                    continue
-                audio = clip["audio"]
-                offset = int(clip.get("offset", 0))
-                length = int(clip.get("length", max(0, len(audio) - offset)))
-                gain = float(clip["gain"]) * float(clip.get("clip_gain", 1.0))
-                pan = clip["pan"]
-                left_gain = gain * (1.0 - max(0.0, pan))
-                right_gain = gain * (1.0 + min(0.0, pan))
-                fade_in = int(clip.get("fade_in", 0))
-                fade_out = int(clip.get("fade_out", 0))
-                play_end = offset + max(0, length)
-                scratch = None
-                if capture and index < len(self._track_rings):
-                    scratch = self._scratch[:frames]
-                    scratch.fill(0)
-                peak = 0.0
-                filled = 0
-                for seg_position, span in segments:
-                    source_start = seg_position - clip["start"]
-                    file_start = offset + source_start
-                    overlap_start = max(offset, file_start)
-                    overlap_end = min(len(audio), play_end, file_start + span)
-                    if overlap_end > overlap_start:
-                        dest_start = filled + (overlap_start - file_start)
-                        dest_end = dest_start + (overlap_end - overlap_start)
-                        piece_l = audio[overlap_start:overlap_end, 0] * left_gain
-                        piece_r = audio[overlap_start:overlap_end, 1] * right_gain
-                        if fade_in or fade_out:
-                            rel = np.arange(overlap_start - offset, overlap_end - offset, dtype=np.float32)
-                            env = np.ones(rel.shape, dtype=np.float32)
-                            if fade_in > 0:
-                                env *= np.clip(rel / float(fade_in), 0.0, 1.0)
-                            if fade_out > 0:
-                                env *= np.clip((length - rel) / float(fade_out), 0.0, 1.0)
-                            piece_l = piece_l * env
-                            piece_r = piece_r * env
-                        outdata[dest_start:dest_end, 0] += piece_l
-                        outdata[dest_start:dest_end, 1] += piece_r
-                        if scratch is not None:
-                            scratch[dest_start:dest_end, 0] = piece_l
-                            scratch[dest_start:dest_end, 1] = piece_r
-                        piece_peak = float(max(np.max(np.abs(piece_l)), np.max(np.abs(piece_r))))
-                        if piece_peak > peak:
-                            peak = piece_peak
-                    filled += span
-                if index < len(self._track_peaks) and peak > self._track_peaks[index]:
-                    self._track_peaks[index] = peak
-                if scratch is not None:
-                    self._track_rings[index].push(scratch)
+            sounds_at = self._sounds_at(time_info)
+            if playing:
+                self._mix_transport(outdata, frames, sounds_at)
+            voiced = bool(self._voices)
+            if voiced:
+                self._mix_voices(outdata, frames, sounds_at)
             if self._output_gain != 1.0:
                 outdata *= self._output_gain
             if self._master_muted:
                 outdata.fill(0)
+            if voiced:
+                self._limit(outdata, frames)
+            else:
+                self._limit_gain = 1.0
             np.clip(outdata, -1.0, 1.0, out=outdata)
             if frames:
                 master_peak = float(np.max(np.abs(outdata)))
@@ -394,7 +390,82 @@ class AudioEngine:
                     self._master_peak = master_peak
             if self._capture_enabled:
                 self._master_ring.push(outdata[:frames])
-            self._position = next_position
+
+    def _mix_transport(self, outdata, frames: int, sounds_at: float) -> None:
+        position = self._position
+        clips = list(self._clips)
+        soloed = any(clip.get("solo") for clip in clips)
+        capture = self._capture_enabled and frames <= len(self._scratch)
+        segments, next_position = self._playback_segments(position, frames)
+        self._heard = (self._heard + ((sounds_at, tuple(segments)),))[-HEARD_BLOCKS:]
+        for index, clip in enumerate(clips):
+            heard = not clip["muted"] and not (soloed and not clip.get("solo"))
+            if not heard:
+                continue
+            scratch = None
+            if capture and index < len(self._track_rings):
+                scratch = self._scratch[:frames]
+                scratch.fill(0)
+            peak = 0.0
+            filled = 0
+            for seg_position, span in segments:
+                target = scratch[filled : filled + span] if scratch is not None else outdata[filled : filled + span]
+                peak = max(peak, mix_clip_into(target, clip, seg_position))
+                filled += span
+            if scratch is not None:
+                outdata[:frames] += scratch
+            if index < len(self._track_peaks) and peak > self._track_peaks[index]:
+                self._track_peaks[index] = peak
+            if scratch is not None:
+                self._track_rings[index].push(scratch)
+        self._position = next_position
+
+    def _mix_voices(self, outdata, frames: int, sounds_at: float) -> None:
+        """Add every playing preview voice. Each reads the clip's audio that
+        is already in memory; nothing here decodes or touches the disk."""
+        clips = self._clips
+        finished = []
+        for key, voice in self._voices.items():
+            if not voice.playing:
+                continue
+            if not (0 <= voice.clip < len(clips)):
+                finished.append(key)
+                continue
+            count = min(frames, voice.end - voice.cursor)
+            if count > 0:
+                peak = mix_clip_into(outdata[:count], clips[voice.clip], voice.cursor)
+                if voice.clip < len(self._track_peaks) and peak > self._track_peaks[voice.clip]:
+                    self._track_peaks[voice.clip] = peak
+                voice.cursor += count
+            if voice.cursor >= voice.end:
+                finished.append(key)
+        for key in finished:
+            del self._voices[key]
+        self._publish_previews(sounds_at)
+
+    def _limit(self, outdata, frames: int) -> None:
+        """Peak limiter for stacked preview voices: instant attack, smooth
+        release, so several loud stems together do not hard-clip."""
+        peak = float(np.max(np.abs(outdata[:frames]))) if frames else 0.0
+        target = 1.0 if peak <= LIMIT_CEILING else LIMIT_CEILING / peak
+        previous = self._limit_gain
+        if target < previous:
+            gain = np.full(frames, target, dtype=np.float32)
+        else:
+            step = frames / (LIMIT_RELEASE_SECONDS * OUTPUT_RATE)
+            reach = min(target, previous + step)
+            gain = np.linspace(previous, reach, frames, dtype=np.float32)
+            target = reach
+        self._limit_gain = float(target)
+        if target < 1.0 or previous < 1.0:
+            outdata[:frames] *= gain[:, None]
+
+    def _publish_previews(self, sounds_at: float | None = None) -> None:
+        when = time.monotonic() if sounds_at is None else sounds_at
+        self._preview_view = {
+            key: (voice.playing, voice.start, voice.end, voice.cursor, when)
+            for key, voice in self._voices.items()
+        }
 
     def _sounds_at(self, time_info) -> float:
         """Monotonic time at which the block being written starts to sound."""
@@ -413,17 +484,7 @@ class AudioEngine:
             if self._playing:
                 return
             self._heard = ()
-            if self._stream is None:
-                self._stream = sd.OutputStream(
-                    samplerate=OUTPUT_RATE,
-                    channels=2,
-                    dtype="float32",
-                    blocksize=BLOCK_SIZE,
-                    callback=self._callback,
-                )
-                self._stream.start()
-            elif not self._stream.active:
-                self._stream.start()
+            self._ensure_stream()
             self._playing = True
 
     def pause(self):
@@ -437,9 +498,99 @@ class AudioEngine:
             self._position = 0
             self._heard = ()
 
+    def preview_play(self, blocks) -> None:
+        """Start or resume preview voices, all on the same audio block.
+
+        ``blocks`` is a list of ``(key, clip index, start seconds, end
+        seconds)`` in arrangement time. A paused voice resumes where it
+        stopped; a playing one carries on. The transport is not touched.
+        Raises if the audio output cannot start.
+        """
+        with self._lock:
+            for key, clip, start, end in blocks:
+                voice = self._voices.get(key)
+                if voice is not None:
+                    voice.playing = True
+                    continue
+                first = max(0, int(round(float(start) * OUTPUT_RATE)))
+                last = int(round(float(end) * OUTPUT_RATE))
+                if last > first:
+                    self._voices[key] = _Voice(key, clip, first, last)
+            self._publish_previews()
+        self._ensure_stream()
+
+    def preview_pause(self, key) -> None:
+        with self._lock:
+            voice = self._voices.get(key)
+            if voice is not None:
+                voice.playing = False
+            self._publish_previews()
+
+    def preview_stop(self, key) -> None:
+        with self._lock:
+            self._voices.pop(key, None)
+            self._publish_previews()
+
+    def preview_retarget(self, changes: dict) -> None:
+        """Clips were reloaded in a new order: ``old key -> (new key, clip
+        index)`` keeps those voices playing from the same place."""
+        with self._lock:
+            moved = []
+            for old, (new, clip) in changes.items():
+                voice = self._voices.pop(old, None)
+                if voice is not None:
+                    voice.key = new
+                    voice.clip = int(clip)
+                    moved.append(voice)
+            for voice in moved:
+                self._voices[voice.key] = voice
+            self._publish_previews()
+
+    def preview_stop_all(self) -> None:
+        with self._lock:
+            self._voices.clear()
+            self._publish_previews()
+
+    def previews(self, now: float | None = None) -> dict:
+        """``key -> (playing, seconds)`` for every preview voice.
+
+        Lock-free, like ``heard_position``: the seconds are what is heard at
+        ``now``, interpolated between audio blocks and inside the block.
+        A finished or stopped voice is absent.
+        """
+        view = self._preview_view
+        if not view:
+            return {}
+        now = time.monotonic() if now is None else float(now)
+        shown = {}
+        for key, (playing, start, end, cursor, sounds_at) in view.items():
+            frame = cursor
+            if playing:
+                # ``cursor`` is the end of the last block written; that block
+                # starts sounding at ``sounds_at``.
+                frame = cursor - BLOCK_SIZE + (now - sounds_at) * OUTPUT_RATE
+            shown[key] = (playing, min(end, max(start, frame)) / OUTPUT_RATE)
+        return shown
+
+    def _ensure_stream(self) -> None:
+        with self._lock:
+            if self._stream is None:
+                self._stream = sd.OutputStream(
+                    samplerate=OUTPUT_RATE,
+                    channels=2,
+                    dtype="float32",
+                    blocksize=BLOCK_SIZE,
+                    callback=self._callback,
+                )
+                self._stream.start()
+            elif not self._stream.active:
+                self._stream.start()
+
     def close(self):
         with self._lock:
             self._playing = False
+            self._voices.clear()
+            self._publish_previews()
             stream, self._stream = self._stream, None
         if stream is not None:
             stream.stop()
