@@ -179,6 +179,14 @@ def clip_local_beats(events, offset: float, duration: float) -> list[tuple[float
     return marks
 
 
+def _shift_adds(event) -> None:
+    """Shift+click adds a whole clip to the selection or takes it out,
+    keeping the others (Qt does that for Ctrl, which here picks one block
+    instead): several clips, whose ▶ then loops that bar on all of them."""
+    if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+        event.setModifiers(event.modifiers() | Qt.KeyboardModifier.ControlModifier)
+
+
 class ClipItem(QGraphicsRectItem):
     def __init__(
         self,
@@ -287,6 +295,7 @@ class ClipItem(QGraphicsRectItem):
         self.canvas_drop_callback = None
         self._press_scene = None
         self._press_play = None
+        self._ctrl_pick = False  # a Ctrl+click picked a block: swallow its release
         self._dragging_whole = False  # a one-block clip past the drag distance
         self._press_item_pos = QPointF()
         # ``outside_drop(clip, scene pos)``: True when released on neither canvas.
@@ -736,6 +745,24 @@ class ClipItem(QGraphicsRectItem):
                 self._loop_handle = handle
                 event.accept()
                 return
+        self._ctrl_pick = False
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._loop_handle is None
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            # Ctrl+click (on its ▶ too) picks or unpicks this one block of
+            # the stem, keeping the other picks, and plays nothing; a plain
+            # ▶ on any picked block then plays them all.
+            self._press_play = None
+            span = self._span_at(event.pos().x())
+            view = self.scene().views()[0] if self.scene() is not None and self.scene().views() else None
+            if span is not None and isinstance(view, TimelineView):
+                view.toggle_pick(self.clip_index, int(span[0]))
+                self._ctrl_pick = True
+                event.accept()
+                return
         # The downbeat marker is the top of the clip. The trim handles stay
         # on the lower part of the same edge. A click on a marker opens its
         # menu on release; pressing it and moving drags the clip, since the
@@ -802,6 +829,7 @@ class ClipItem(QGraphicsRectItem):
         self._row_drag = event.button() == Qt.MouseButton.LeftButton
         self._dragging_whole = False
         self._press_item_pos = QPointF(self.pos())
+        _shift_adds(event)
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -863,6 +891,12 @@ class ClipItem(QGraphicsRectItem):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._ctrl_pick:
+            self._ctrl_pick = False
+            self._press_play = None
+            self._press_scene = None
+            event.accept()
+            return
         if self._loop_handle is not None:
             handle, self._loop_handle = self._loop_handle, None
             free = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -896,7 +930,20 @@ class ClipItem(QGraphicsRectItem):
             self._row_drag = False
             if self._y_locked and abs(float(self.pos().y()) - self._locked_y) > 0.5:
                 self.setPos(self.pos().x(), self._locked_y)
+            # Qt's release would select this clip alone; ▶ keeps the
+            # selection, so ▶ on a selected track plays every selected one.
+            # Shift+▶ adds this track to the selection first.
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            kept = [item for item in self.scene().selectedItems() if isValid(item)] if self.scene() else []
+            if shift and self not in kept:
+                kept.append(self)
             super().mouseReleaseEvent(event)
+            if kept and self.scene() is not None and self.scene().selectedItems() != kept:
+                for item in self.scene().selectedItems():
+                    if item not in kept:
+                        item.setSelected(False)
+                for item in kept:
+                    item.setSelected(True)
             if isValid(button):
                 button.play()
             return
@@ -915,6 +962,7 @@ class ClipItem(QGraphicsRectItem):
             return
         edge = self._edge
         self._edge = None
+        _shift_adds(event)
         super().mouseReleaseEvent(event)
         if edge:
             self._report_moves = True
@@ -1867,6 +1915,13 @@ class TimelineView(QGraphicsView):
         """Picked bars: track index -> bar numbers."""
         return {index: set(bars) for index, bars in self._picks.items() if bars}
 
+    def toggle_pick(self, index: int, bar: int) -> None:
+        """Add one block to the picked blocks, or take it out."""
+        picks = self.picks()
+        bars = picks.setdefault(int(index), set())
+        bars.symmetric_difference_update({int(bar)})
+        self.set_picks(picks)
+
     def set_picks(self, picks: dict) -> None:
         self._picks = {int(index): set(bars) for index, bars in picks.items() if bars}
         self._apply_picks()
@@ -2452,24 +2507,24 @@ class TimelineView(QGraphicsView):
                 pos = self.mapToScene(view_pos)
                 if pos.x() >= HEADER_WIDTH and pos.y() > RULER_HEIGHT:
                     # Left-drag on empty space draws a selection box; a click
-                    # there moves the playhead. The box picks bars; with
-                    # Shift it selects whole tracks (the view's rubber band);
-                    # with Ctrl it adds bars to the ones already picked.
+                    # there moves the playhead. The box picks bars, with or
+                    # without Shift; with Ctrl it adds bars to the ones
+                    # already picked. Picked bars move together, and ▶ on
+                    # one of them plays them all as one.
                     self._empty_press = QPointF(event.position())
-                    if not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                        add = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                        if not add:
-                            self.set_picks({})
-                            self.scene_obj.clearSelection()
-                        band = QGraphicsRectItem(QRectF(pos, pos))
-                        band.setPen(QPen(QColor("#D7B36A"), 1, Qt.PenStyle.DashLine))
-                        band.setBrush(QBrush(QColor(215, 179, 106, 30)))
-                        band.setZValue(30)
-                        band.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-                        self.scene_obj.addItem(self._keep(band))
-                        self._band = (pos, band, add)
-                        event.accept()
-                        return
+                    add = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                    if not add:
+                        self.set_picks({})
+                        self.scene_obj.clearSelection()
+                    band = QGraphicsRectItem(QRectF(pos, pos))
+                    band.setPen(QPen(QColor("#D7B36A"), 1, Qt.PenStyle.DashLine))
+                    band.setBrush(QBrush(QColor(215, 179, 106, 30)))
+                    band.setZValue(30)
+                    band.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                    self.scene_obj.addItem(self._keep(band))
+                    self._band = (pos, band, add)
+                    event.accept()
+                    return
                 elif pos.x() >= HEADER_WIDTH:
                     # A press on the ruler moves the playhead; dragging scrubs.
                     self._scrub = True

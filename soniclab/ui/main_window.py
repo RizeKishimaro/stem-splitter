@@ -972,6 +972,18 @@ class MainWindow(QMainWindow):
             if any(view.cancel_block_drag() for view in self._timelines()):
                 self.statusBar().showMessage("Move cancelled", 2000)
                 return True
+            # Otherwise Esc stops everything playing (the song and every stem
+            # block, like Stop) and deselects the clips and picked blocks.
+            if QApplication.activeModalWidget() is not None or isinstance(
+                QApplication.focusWidget(), (QLineEdit, QAbstractSpinBox, QComboBox)
+            ):
+                return False
+            playing = self.engine.playing or bool(self.engine.previews())
+            if playing:
+                self._stop()
+            if self._deselect_all() or playing:
+                self.statusBar().showMessage("Stopped; nothing selected", 2000)
+                return True
             return False
         if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
             if QApplication.activeModalWidget() is not None:
@@ -2013,6 +2025,24 @@ class MainWindow(QMainWindow):
         self._clear_selection(view.peer)
         view.select_index(index)
 
+    def _deselect_all(self) -> bool:
+        """Clear the selected clips and picked blocks on both canvases, and
+        stop the paused blocks (their grey tint and line go). Blocks still
+        playing go on. Returns whether there was anything to clear."""
+        views = self._timelines()
+        selected = any(view.selected_indices() or view.picks() for view in views)
+        paused = [key for key, state in self.engine.previews().items() if not state[0]]
+        for view in views:
+            view.set_picks({})
+            self._clear_selection(view)
+        for key in paused:
+            self.engine.preview_stop(key)
+        if paused:
+            self._sync_previews()
+        if selected:
+            self._on_track_selected(-1)
+        return selected or bool(paused)
+
     @staticmethod
     def _clear_selection(view) -> None:
         """Deselect everything in ``view`` without reporting "no selection"."""
@@ -2650,6 +2680,14 @@ class MainWindow(QMainWindow):
         view = view or self.timeline
         bar = view.bar_under(pos)
         clip = view.clip_at(pos)
+        selected = [index for other in self._timelines() for index in other.selected_indices()]
+        if clip is not None and clip.isSelected() and len(selected) > 1:
+            # Right-click on one of several selected tracks takes it out of
+            # the selection (Shift+click adds it back); no menu.
+            clip.setSelected(False)
+            name = self.project.tracks[clip.clip_index].get("name", "Track") if clip.clip_index < len(self.project.tracks) else "Track"
+            self.statusBar().showMessage(f"“{name}” is no longer selected", 3000)
+            return
         menu = QMenu(self)
         block = view.block_at(pos)
         states = self.engine.previews()
@@ -3863,8 +3901,32 @@ class MainWindow(QMainWindow):
                     self.engine.preview_pause(key)
                 self._sync_previews()
             else:
+                self._stop_blocks()  # exactly the picks: nothing else plays on
                 self._play_picked_blocks()
             return
+        selected = sorted({index for view in self._timelines() for index in view.selected_indices()})
+        if track in selected and len(selected) > 1:
+            # ▶ (or Shift+▶) on one of several selected tracks (Shift+click):
+            # that bar's time loops on every selected track together. A ▶
+            # on a track that is not selected plays only that track.
+            times = self._view_for(track).block_times(track, bar)
+            if times is not None:
+                middle = (times[0] + times[1]) / 2.0
+                keys = []
+                for index in selected:
+                    other = bar if index == track else self._view_for(index).block_at_time(index, middle)
+                    if other is not None:
+                        keys.append((index, other))
+                voices = {self._voice_key(index, other) for index, other in keys}
+                states = self.engine.previews()
+                if states.get(self._voice_key(track, bar), (False,))[0]:
+                    for voice in voices:
+                        self.engine.preview_pause(voice)
+                    self._sync_previews()
+                else:
+                    self._stop_blocks()  # exactly the selection
+                    self._start_blocks(keys)
+                return
         key = self._voice_key(track, bar)
         state = self.engine.previews().get(key)
         if state is not None and state[0]:
