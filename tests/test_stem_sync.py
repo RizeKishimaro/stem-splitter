@@ -358,14 +358,109 @@ class SharedClockWindowTests(unittest.TestCase):
         self.press(self.index(bass), 2)
         self.assertFalse(self.engine.previews()[keys[1]][0])
         self.assertTrue(self.engine.previews()[keys[0]][0])
-        # Picked blocks start together and loop their whole span.
-        self.engine.preview_stop_all()
-        self.window._view_for(self.index(other)).set_picks({self.index(other): {1}, self.index(vocals): {1, 2}})
-        self.window._play_picked_blocks()
+    def test_picked_bars_side_by_side_play_as_one_block(self):
+        drums, bass, other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(other))
+        # Vocals bars 2 and 3 side by side, other bar 2 alone, bass bar 4.
+        view.set_picks({self.index(other): {1}, self.index(vocals): {1, 2}, self.index(bass): {3}})
+        self.press(self.index(vocals), 2)  # ▶ on a picked block: the whole pick
+        group = stem_group(drums)
         self.assertEqual(self.engine._groups[group].cursor, 2 * OUTPUT_RATE)
-        self.assertEqual(self.engine._groups[group].loop, (2 * OUTPUT_RATE, 4 * OUTPUT_RATE))
+        self.assertEqual(self.engine._groups[group].loop, (2 * OUTPUT_RATE, 6 * OUTPUT_RATE))
+        run = (self.index(vocals), stem_block(1))
         playing = {key for key, state in self.engine.previews().items() if state[0]}
-        self.assertEqual(playing, {(self.index(other), stem_block(1)), (self.index(vocals), stem_block(1)), (self.index(vocals), stem_block(2))})
+        self.assertEqual(playing, {(self.index(other), stem_block(1)), run, (self.index(bass), stem_block(3))})
+        cycle = 2 * OUTPUT_RATE
+        mixed = self.mix(2 * 4 * OUTPUT_RATE // BLOCK + 1)  # twice round the 4 s loop
+        fade = 64
+        # First 2 s: other bar 2, vocals bar 2, bass bar 4 (one bar, then silent).
+        first = lag_samples(mixed[: cycle - fade], cycle, (3, 4, 2), (0, 0, 2 * cycle))
+        # Next 2 s: vocals goes on into bar 3; the one-bar blocks loop their
+        # own bar again, never the bar after it.
+        second = lag_samples(mixed[cycle + fade : 2 * cycle - fade], 2 * cycle + fade, (4, 3, 2), (0, -cycle, cycle))
+        report("window: one combined block and two one-bar loops", max(first, second))
+        self.assertLess(max(first, second), 0.25)
+        # The one-bar blocks wrap with a crossfade, not a click.
+        steps = np.abs(np.diff(mixed[cycle - 2 * fade : cycle + 2 * fade]))
+        print(f"\n  largest step where two blocks wrap: {steps.max():.2e}", end="")
+        self.assertLess(steps.max(), 0.002)
+        # Each line stays inside its own block, looping there.
+        self.window._sync_previews()
+        for track, bars in ((other, {1}), (bass, {3}), (vocals, {1, 2})):
+            clip = view._clip_for(self.index(track))
+            self.assertEqual(set(clip._preview), bars)
+            span = next(sp for sp in view._spans_of(clip) if sp[0] == min(bars))
+            last = next(sp for sp in view._spans_of(clip) if sp[0] == max(bars))
+            for _playing, x in clip._preview.values():
+                self.assertTrue(span[1] - 1 <= x <= last[2] + 1, (track["name"], x, span, last))
+        loop = mixed[: 2 * cycle]
+        self.assertTrue(np.array_equal(mixed[2 * cycle + fade : 4 * cycle - fade], loop[fade : 2 * cycle - fade]))
+        # The run shows on both its bars, the ⏸ on each.
+        clip = view._clip_for(self.index(vocals))
+        self.window._sync_previews()
+        self.assertEqual(set(clip._preview), {1, 2})
+        # ▶ on any picked block again pauses the whole pick.
+        self.press(self.index(other), 1)
+        self.assertFalse(any(state[0] for state in self.engine.previews().values()))
+
+    def test_pieces_of_one_stem_side_by_side_play_as_one(self):
+        drums, bass, *_rest = self.split("Song")
+        view = self.window._view_for(self.index(bass))
+        view.set_picks({self.index(bass): {1, 2}})
+        self.window._move_selected_to_other_canvas()  # cut into two clips
+        self.app.processEvents()
+        tracks = self.window.project.tracks
+        pieces = sorted((i for i, t in enumerate(tracks) if t.get("canvas") == 1), key=lambda i: tracks[i]["start"])
+        self.assertEqual(len(pieces), 2)
+        other = self.window.timeline2
+        other.set_picks({})
+        bars = [other.block_at_time(i, tracks[i]["start"] + 0.5) for i in pieces]
+        self.press(pieces[1], bars[1])  # the second piece first, then its neighbour
+        self.mix(5)
+        self.press(pieces[0], bars[0])
+        group = stem_group(drums)
+        self.assertEqual(self.engine._groups[group].loop, (2 * OUTPUT_RATE, 6 * OUTPUT_RATE))
+        self.assertEqual(self.engine._groups[group].cursor, 2 * OUTPUT_RATE)
+        mixed = self.mix(4 * OUTPUT_RATE // BLOCK)
+        error = lag_samples(mixed[: 4 * OUTPUT_RATE - 64], 2 * OUTPUT_RATE, (2,))
+        report("window: two pieces of one stem as one block", error)
+        self.assertLess(error, 0.25)  # bar 2 then bar 3, never both at once
+        # The last piece ends its clip: the wrap fades it out, no click.
+        around = self.mix(4)
+        steps = np.abs(np.diff(np.concatenate((mixed[-256:], around))))
+        print(f"\n  largest step where cut pieces wrap: {steps.max():.2e}", end="")
+        self.assertLess(steps.max(), 0.002)
+        # Both pieces show as playing.
+        self.assertTrue(all(state[0] for state in self.engine.previews().values()))
+        self.assertEqual(len(self.engine.previews()), 2)
+
+    def test_picked_blocks_and_selected_clips_move_to_the_other_canvas(self):
+        drums, bass, other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.set_picks({self.index(drums): {1}, self.index(bass): {1, 2}})
+        self.window._move_selected_to_other_canvas()
+        self.app.processEvents()
+        moved = [t for t in self.window.project.tracks if t.get("canvas") == 1]
+        self.assertEqual(len(moved), 3)  # drums bar 2, bass bars 2 and 3
+        self.assertTrue(all(stem_group(t) == stem_group(drums) for t in moved))
+        self.assertEqual(sorted(round(t["start"], 3) for t in moved), [2.0, 2.0, 4.0])
+        # Moved pieces still play in step with the stems left behind.
+        index = next(i for i, t in enumerate(self.window.project.tracks) if t.get("canvas") == 1)
+        self.window.timeline2.set_picks({})
+        self.press(index, 0)
+        self.press(self.index(other), 1)
+        frame = self.engine._groups[stem_group(drums)].cursor
+        self.assertEqual(frame, 2 * OUTPUT_RATE)
+        # Selected whole clips go together too.
+        self.window.timeline.scene_obj.clearSelection()
+        for clip in self.window.timeline._clip_items():
+            if clip.clip_index in (self.index(other), self.index(vocals)):
+                clip.setSelected(True)
+        self.window._move_selected_to_other_canvas()
+        self.app.processEvents()
+        self.assertEqual(other.get("canvas"), 1)
+        self.assertEqual(vocals.get("canvas"), 1)
+
 
     def test_stems_on_different_bars_loop_their_own_bars_in_step(self):
         drums, bass, other, _vocals = self.split("Song")
@@ -379,9 +474,9 @@ class SharedClockWindowTests(unittest.TestCase):
         shifts = (0, 2 * cycle, -cycle)
         wrap = 4 * OUTPUT_RATE - joined_at
         mixed = self.mix((wrap + cycle) // BLOCK + 1)
-        error = lag_samples(mixed[:wrap], joined_at, (1, 2, 3), shifts)
-        fade = 64  # the wrap's crossfade
-        again = lag_samples(mixed[wrap + fade : wrap + cycle], cycle + fade, (1, 2, 3), shifts)
+        fade = 64  # the wrap's crossfade (bass bar 4 ends the file: it fades out)
+        error = lag_samples(mixed[: wrap - fade], joined_at, (1, 2, 3), shifts)
+        again = lag_samples(mixed[wrap + fade : wrap + cycle - fade], cycle + fade, (1, 2, 3), shifts)
         report("window: three stems on three bars", max(error, again))
         self.assertLess(max(error, again), 0.25)
         # Each pause button shows on the stem's own bar.
@@ -390,24 +485,24 @@ class SharedClockWindowTests(unittest.TestCase):
         for track, bar in ((drums, 1), (bass, 3), (other, 0)):
             index = self.index(track)
             self.assertEqual(view.block_at_time(index, states[(index, stem_block(bar))][1]), bar)
-        # Another bar of a playing stem loops too, in step with the rest.
-        self.press(self.index(bass), 2)
+        # Another bar of a playing stem (not beside it) loops too, in step.
+        self.press(self.index(bass), 1)
         frame = self.engine._groups[group].cursor
-        both = (self.index(bass), stem_block(3)), (self.index(bass), stem_block(2))
+        both = (self.index(bass), stem_block(3)), (self.index(bass), stem_block(1))
         self.assertTrue(all(self.engine.previews()[key][0] for key in both))
-        self.assertEqual(self.engine._voices[both[1]].shift, cycle)
+        self.assertEqual(self.engine._voices[both[1]].shift, 0)
         mixed = self.mix(10)
-        error = lag_samples(mixed, frame, (1, 2, 2, 3), (0, 2 * cycle, cycle, -cycle))
+        error = lag_samples(mixed, frame, (1, 2, 2, 3), (0, 2 * cycle, 0, -cycle))
         report("window: one stem on two bars", error)
         self.assertLess(error, 0.25)
         # Pausing one bar leaves the other playing, and its line stops.
-        self.press(self.index(bass), 2)
+        self.press(self.index(bass), 1)
         paused = self.engine.previews()[both[1]]
         self.assertFalse(paused[0])
         self.assertTrue(self.engine.previews()[both[0]][0])
         self.mix(20)
         self.assertEqual(self.engine.previews(now=time.monotonic() + 0.5)[both[1]], paused)
-        self.assertEqual(self.window._view_for(self.index(bass)).block_at_time(self.index(bass), paused[1]), 2)
+        self.assertEqual(self.window._view_for(self.index(bass)).block_at_time(self.index(bass), paused[1]), 1)
 
     def test_mixer_mute_and_volume_apply_to_one_stem(self):
         drums, bass, *_rest = self.split("Song")

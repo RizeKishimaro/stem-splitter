@@ -2609,10 +2609,39 @@ class MainWindow(QMainWindow):
         return new_index
 
     def _move_selected_to_other_canvas(self) -> None:
-        index = self._selected
-        if not (0 <= index < len(self.project.tracks)):
+        """The selection to the other canvas, at the same time, on new rows
+        past its last one (keeping their rows relative to each other):
+        picked blocks if any are picked (cut out of their tracks), else
+        every selected clip, else the selected track."""
+        tracks = self.project.tracks
+        for view in self._timelines():
+            blocks = view.picked_blocks()
+            if not blocks:
+                continue
+            rows, _ = view.lane_rows(tracks)
+            grabbed = min(range(len(blocks)), key=lambda n: (rows[blocks[n][0]], blocks[n][1]))
+            target = 0 if view.canvas == 1 else 1
+            if target == 1 and not self.splitter2.isVisible():
+                self._toggle_second_canvas(True)
+            other = view.peer
+            _, primaries = other.lane_rows(tracks)
+            self._move_blocks(view, [item[:4] for item in blocks], grabbed, 0.0, target, len(primaries))
             return
-        target = 0 if track_canvas(self.project.tracks[index]) == 1 else 1
+        for view in self._timelines():
+            indices = [i for i in view.selected_indices() if 0 <= i < len(tracks)]
+            if len(indices) < 2:
+                continue
+            if view.canvas == 0 and not self.splitter2.isVisible():
+                self._toggle_second_canvas(True)
+            rows, _ = view.lane_rows(tracks)
+            grabbed = min(indices, key=lambda i: rows[i])
+            _, primaries = view.peer.lane_rows(tracks)
+            self._drop_on_canvas(view, indices, grabbed, 0.0, len(primaries))
+            return
+        index = self._selected
+        if not (0 <= index < len(tracks)):
+            return
+        target = 0 if track_canvas(tracks[index]) == 1 else 1
         if target == 1:
             self._toggle_second_canvas(True)
         self._move_track_to_canvas(index, target)
@@ -2639,6 +2668,7 @@ class MainWindow(QMainWindow):
         if any(view.picks() for view in self._timelines()):
             menu.addAction("Play Picked Blocks Together", self._play_picked_blocks)
             menu.addAction("Loop Picked Stems in Sync", self._loop_picked_stems)
+            menu.addAction("Move Picked Blocks to Other Canvas", self._move_selected_to_other_canvas)
         if block is not None and stem_loop(self.project.tracks[block[0]]) is not None:
             menu.addAction("Remove This Stem from the Synced Loop", lambda index=block[0]: self._remove_from_stem_loop(index))
             menu.addAction("Clear the Synced Loop", lambda index=block[0]: self._clear_stem_loop(index))
@@ -3802,6 +3832,13 @@ class MainWindow(QMainWindow):
     # pressed on it, in step with the clock: a stem started on another bar
     # plays that bar at the same place in the loop (a shift on the clock),
     # and several bars of one stem can loop at once, each its own voice.
+    # Picked bars side by side on one row play as one block (a run): one
+    # voice from the first bar to the end of the last, keyed by the first.
+    # A block shorter than the loop is silent for the rest of each cycle.
+    # Blocks of different clips that carry on from each other (one stem
+    # file, one row, touching in time and in the file, as when a stem was
+    # cut into pieces) form a chain: they share the chain's place on the
+    # clock, so they play one after the other as one block.
     # A split's synced loop (stem_loop) repeats its own region instead.
 
     def _voice_key(self, track: int, bar: int) -> tuple[int, int]:
@@ -3809,10 +3846,25 @@ class MainWindow(QMainWindow):
         if 0 <= track < len(tracks) and stem_group(tracks[track]):
             if stem_loop(tracks[track]) is not None:
                 return int(track), STEM_VOICE
+            for key, (_data, run) in self._preview_tracks.items():
+                if key[0] == track and key[1] <= STEM_BLOCK and run and run[0] <= bar <= run[1]:
+                    return key  # a bar of a run playing as one block
             return int(track), stem_block(bar)
         return int(track), int(bar)
 
     def _toggle_block(self, track: int, bar: int) -> None:
+        picks = self._view_for(track).picks()
+        if bar in picks.get(track, ()) and sum(len(bars) for bars in picks.values()) > 1:
+            # ▶ on a picked block plays (or pauses) the whole selection.
+            keys = {self._voice_key(index, other) for index, bars in picks.items() for other in bars}
+            states = self.engine.previews()
+            if any(states.get(key, (False,))[0] for key in keys):
+                for key in keys:
+                    self.engine.preview_pause(key)
+                self._sync_previews()
+            else:
+                self._play_picked_blocks()
+            return
         key = self._voice_key(track, bar)
         state = self.engine.previews().get(key)
         if state is not None and state[0]:
@@ -3821,16 +3873,111 @@ class MainWindow(QMainWindow):
             return
         self._start_blocks([(track, bar)])
 
+    def _block_runs(self, keys) -> list[tuple[int, int, int]]:
+        """``(track, first bar, last bar)`` for ``keys``: a stem's bars side
+        by side become one run; every other block stands alone."""
+        tracks = self.project.tracks
+        bars: dict[int, set] = {}
+        units = []
+        for track, bar in keys:
+            if 0 <= track < len(tracks) and stem_group(tracks[track]) and stem_loop(tracks[track]) is None:
+                bars.setdefault(track, set()).add(int(bar))
+            else:
+                units.append((track, bar, bar))
+        for track, found in bars.items():
+            view = self._view_for(track)
+            run = None
+            for bar in sorted(found):
+                times = view.block_times(track, bar)
+                if times is None:
+                    continue
+                if run is not None and run[1] == bar - 1 and abs(run[2] - times[0]) < 1e-3:
+                    run = (run[0], bar, times[1])
+                    continue
+                if run is not None:
+                    units.append((track, run[0], run[1]))
+                run = (bar, bar, times[1])
+            if run is not None:
+                units.append((track, run[0], run[1]))
+        return units
+
+    def _stem_chains(self, units) -> dict:
+        """``(track, first bar) -> (chain number, song start, song end)`` for
+        the stem block units (see _block_runs) that chain together; a unit
+        alone is a chain of one."""
+        tracks = self.project.tracks
+        found = []
+        for track, first, last in units:
+            data = tracks[track] if 0 <= track < len(tracks) else None
+            if data is None or stem_group(data) is None or stem_loop(data) is not None:
+                continue
+            view = self._view_for(track)
+            head, tail = view.block_times(track, first), view.block_times(track, last)
+            if head is None or tail is None:
+                continue
+            rows, _ = view.lane_rows(tracks)
+            place = (stem_group(data), data.get("path"), track_canvas(data), rows[track])
+            found.append((head[0], tail[1], self._song_time(data, head[0]), self._song_time(data, tail[1]), place, (track, first)))
+        found.sort(key=lambda item: item[0])
+        chains = []  # [place, arrangement end, song start, song end, units]
+        for start, end, song, song_end, place, unit in found:
+            for chain in chains:
+                if chain[0] == place and abs(chain[1] - start) < 1e-3 and abs(chain[3] - song) < 1e-3:
+                    chain[1], chain[3] = end, song_end
+                    chain[4].append(unit)
+                    break
+            else:
+                chains.append([place, end, song, song_end, [unit]])
+        return {unit: (number, chain[2], chain[3]) for number, chain in enumerate(chains) for unit in chain[4]}
+
+    def _with_neighbours(self, units) -> list:
+        """A block pressed beside one of its chain that is already playing:
+        that split's playing blocks stop and start again with it, so the
+        chain plays as one from its start."""
+        existing = {
+            (key[0], run[0]): (key, (key[0], run[0], run[1]))
+            for key, (_data, run) in self._preview_tracks.items()
+            if key[1] <= STEM_BLOCK and run
+        }
+        asked = {(track, first) for track, first, _last in units}
+        extra = [unit for unit_key, (_key, unit) in existing.items() if unit_key not in asked]
+        if not extra:
+            return units
+        chains = self._stem_chains(units + extra)
+        tracks = self.project.tracks
+        restart = set()
+        for unit_key in asked:
+            if unit_key not in chains:
+                continue
+            number = chains[unit_key][0]
+            if any(chains.get(other[:2], (None,))[0] == number for other in extra):
+                restart.add(stem_group(tracks[unit_key[0]]))
+        if not restart:
+            return units
+        units = list(units)
+        for unit_key, (key, unit) in existing.items():
+            if unit_key in asked or stem_group(tracks[key[0]]) not in restart:
+                continue
+            self.engine.preview_stop(key)
+            del self._preview_tracks[key]
+            units.append(unit)
+        return units
+
     def _start_blocks(self, keys) -> None:
         """Start (or resume) blocks together, on the same audio sample.
         Stems join their split's clock; see _voice_key."""
         blocks = []
         groups: dict[str, list] = {}  # group -> [start, members, loop, end] (song seconds)
-        spans: dict[tuple, tuple] = {}  # stem voice key -> (start, end) of its block
-        for track, bar in keys:
-            times = self._view_for(track).block_times(track, bar)
+        spans: dict[tuple, tuple] = {}  # stem voice key -> (start, end) of its chain
+        units = self._with_neighbours(self._block_runs(keys))
+        chains = self._stem_chains(units)
+        for track, bar, last in units:
+            view = self._view_for(track)
+            times = view.block_times(track, bar)
             if times is None:
                 continue
+            if last != bar:
+                times = (times[0], view.block_times(track, last)[1])
             data = self.project.tracks[track]
             group = stem_group(data)
             if group is None:
@@ -3846,10 +3993,19 @@ class MainWindow(QMainWindow):
             entry = groups.setdefault(group, [song, {}, loop, end])
             entry[0] = min(entry[0], song)
             entry[3] = max(entry[3], end)
-            key = self._voice_key(track, bar)
-            spans[key] = (song, end)
+            if loop is None:
+                key = (track, stem_block(bar))
+                # Blocks of this stem inside the new run give way to it.
+                for other, (_data, run) in list(self._preview_tracks.items()):
+                    if other[0] == track and other[1] <= STEM_BLOCK and other != key and run and run[0] <= last and bar <= run[1]:
+                        self.engine.preview_stop(other)
+                        del self._preview_tracks[other]
+                self._preview_tracks[key] = (data, (bar, last))
+            else:
+                key = (track, STEM_VOICE)
+                self._preview_tracks[key] = (data, None)
+            spans[key] = chains[(track, bar)][1:] if (track, bar) in chains else (song, end)
             entry[1][key] = (key, track, bool(data.get("muted", False)))
-            self._preview_tracks[key] = (data, None)
         if not blocks and not groups:
             return
         joining = {group for group in groups if self.engine.group_position(group) is not None}
@@ -3860,15 +4016,15 @@ class MainWindow(QMainWindow):
             if group in joining:
                 ref = self.engine.group_loop(group)
             else:
-                # The first block sets the clock; the loop is as long as
-                # the longest block.
-                first = spans[next(iter(members))][0]
+                # The earliest block sets the clock; the loop is as long
+                # as the longest block.
+                first = min(spans[key][0] for key in members)
                 length = max(spans[key][1] - spans[key][0] for key in members)
                 ref = entry[2] = (first, first + length)
                 entry[0] = first
             for key, member in members.items():
                 shift = 0.0 if ref is None else spans[key][0] - ref[0]
-                members[key] = (*member, shift)
+                members[key] = (*member, shift, spans[key][1] - spans[key][0])
         try:
             with self.engine.batch():  # everything starts on the same block
                 if blocks:
@@ -4061,7 +4217,13 @@ class MainWindow(QMainWindow):
                 if bar is None:
                     continue
             elif bar < 0:
-                bar = stem_block(bar)
+                # A block (or a run of them) shows on every bar it covers.
+                entry = self._preview_tracks.get((track, bar))
+                first = stem_block(bar)
+                last = entry[1][1] if entry and entry[1] else first
+                for covered in range(first, last + 1):
+                    blocks[(track, covered)] = state
+                continue
             blocks[(track, bar)] = state
         for timeline in self._timelines():
             timeline.set_previews(blocks)
