@@ -18,9 +18,8 @@ advanced time-stretching and robust device selection are not implemented yet.
 
 ```fish
 sudo pacman -S --needed python python-pip python-virtualenv libsndfile portaudio
-mkdir -p ~/Projects/soniclab
-cd ~/Projects/soniclab
-unzip ~/Downloads/soniclab-starter.zip
+mkdir -p ~/Projects/StemSession
+cd ~/Projects/StemSession
 python -m venv .venv
 source .venv/bin/activate.fish
 python -m pip install --upgrade pip
