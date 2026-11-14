@@ -215,7 +215,8 @@ class WindowTests(unittest.TestCase):
         window._import_paths([song])
         window.finish_loading()
         self.assertTrue(window.stem_banner.isVisible())
-        self.assertIn("Splitting “My Song” into drums, bass, other and vocals", window.stem_label.text())
+        self.assertIn("Splitting “My Song”", window.stem_label.text())
+        self.assertIn("into stems", window.stem_label.toolTip())
         # The full song is never added while it splits.
         self.assertEqual(window.project.tracks, [])
         self.assertEqual(self.jobs.submitted, [])

@@ -404,12 +404,13 @@ class ClipItem(QGraphicsRectItem):
     def set_block_spans(self, cuts, spans) -> None:
         """Remember each bar block.
 
-        A plain drag moves the whole track, bar blocks and all. With more
-        than one block, Ctrl-drag (⌘-drag on macOS) takes one bar out of it.
+        A clip of one block moves as a whole. With more than one block only
+        the block under the mouse is ever dragged: the clip itself is not
+        movable, so no press (Shift or otherwise) can slide the whole track.
         """
         self.set_bar_cuts(cuts)
         self._block_spans = tuple(spans)
-        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, len(self._block_spans) <= 1)
         if len(self._block_spans) > 1:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             self.setToolTip(

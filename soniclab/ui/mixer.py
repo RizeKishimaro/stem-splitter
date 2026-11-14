@@ -183,6 +183,9 @@ class Mixer(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Always room for the strip row's scroll bar: when strips outgrow the
+        # dock the mixer keeps its height, so the canvases above never shift.
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.body = QWidget()
         self.row = QHBoxLayout(self.body)
         self.row.setContentsMargins(0, 0, 0, 0)

@@ -247,6 +247,8 @@ class MainWindow(QMainWindow):
         row.setSpacing(12)
         self.stem_label = QLabel()
         self.stem_label.setObjectName("stemLabel")
+        # Fixed widths: a new percentage or song name never re-lays the bar.
+        self.stem_label.setFixedWidth(360)
         self.stem_bar = QProgressBar()
         self.stem_bar.setObjectName("stemProgress")
         self.stem_bar.setRange(0, 1000)
@@ -259,6 +261,12 @@ class MainWindow(QMainWindow):
         row.addWidget(self.stem_label)
         row.addWidget(self.stem_bar, 1)
         row.addWidget(self.stem_cancel)
+        self.stem_bar.setFixedWidth(220)
+        # Its place in the status bar is kept while hidden, so showing it
+        # never slides the status bar's other contents.
+        policy = self.stem_banner.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.stem_banner.setSizePolicy(policy)
         self.stem_banner.setVisible(False)
         # In the status bar, not above the canvases: showing and hiding it
         # must not push the canvases down and back up.
@@ -1241,9 +1249,10 @@ class MainWindow(QMainWindow):
         self.stem_bar.setValue(int(round(max(0.0, min(1.0, fraction)) * 1000)))
         name = self._splitting_name()
         queued = f"   ·   {waiting - 1} more waiting" if waiting > 1 else ""
-        self.stem_label.setText(
-            f"Splitting “{name}” into drums, bass, other and vocals…  {int(fraction * 100)}%{queued}"
-        )
+        text = f"Splitting “{name}”…  {int(fraction * 100):3d}%{queued}"
+        metrics = self.stem_label.fontMetrics()
+        self.stem_label.setText(metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, self.stem_label.width()))
+        self.stem_label.setToolTip(f"Splitting “{name}” into stems: drums, bass, other and vocals{queued}")
 
     def _splitting_name(self) -> str:
         return next(iter(self._stem_names.values()), "song")
@@ -2355,11 +2364,8 @@ class MainWindow(QMainWindow):
         self._refresh_timeline()
         self._select_track(index)
         where = "the second canvas" if canvas else "the main canvas"
+        # Neither canvas scrolls: a transfer never moves the view under the user.
         self.statusBar().showMessage(f"Moved “{tracks[index].get('name', 'Track')}” to {where}", 3000)
-        if self.canvas_side_by_side:
-            # Side by side the canvases scroll apart; show where it landed.
-            # Stacked they share one stretch of time, so nothing scrolls.
-            self._reveal_track(index)
 
     def _move_track_to_row(self, index: int, view, display_row: int) -> None:
         """Put one clip on another row of its canvas: it joins the clips on
@@ -2430,8 +2436,7 @@ class MainWindow(QMainWindow):
         grabbed_track = moving[indices.index(grabbed)] if grabbed in indices else None
         if grabbed_track is not None:
             index = next(i for i, other in enumerate(tracks) if other is grabbed_track)
-            self._select_track(index)
-            self._reveal_track(index)
+            self._select_track(index)  # dropped where the user can see it: no scroll
         where = "the second canvas" if canvas else "the main canvas"
         count = len(moving)
         self.statusBar().showMessage(
@@ -2548,8 +2553,7 @@ class MainWindow(QMainWindow):
             view.set_picks({})
         target.pick_whole_clips(indices)
         first = min(indices)
-        self._select_track(first)
-        self._reveal_track(first)
+        self._select_track(first)  # dropped where the user can see it: no scroll
         count = len(moved)
         where = "canvas 2" if canvas else "the main canvas"
         self.statusBar().showMessage(f"Moved {count} bar{'s' if count != 1 else ''} on {where}", 3000)
@@ -3125,8 +3129,6 @@ class MainWindow(QMainWindow):
         self._refresh_timeline()
         self._select_track(piece_index)
         self.statusBar().showMessage(f"Moved bar {int(bar) + 1}", 2000)
-        if canvas is not None:
-            self._reveal_track(piece_index)
 
     def _split_selected(self) -> None:
         index = self._selected
