@@ -1,6 +1,7 @@
 import os
 import tempfile
 import time
+import uuid
 
 import numpy as np
 import soundfile as sf
@@ -126,6 +127,8 @@ from soniclab.ui.timeline import (
     ClipItem,
     TimelineView,
     parse_time_signature,
+    stem_group,
+    stem_loop,
     track_canvas,
 )
 
@@ -133,6 +136,26 @@ from soniclab.ui.timeline import (
 # labels and background jobs stay on the slower transport timer.
 PLAYHEAD_FRAME_MS = 16
 FOLLOW_LABELS = {FOLLOW_OFF: "Off", FOLLOW_PAGE: "Follow", FOLLOW_CENTER: "Center"}
+# A stem of a split song plays on its split's shared clock. A stem in the
+# split's synced loop is one voice keyed (track index, STEM_VOICE); each
+# other stem block is its own voice, keyed (track index, stem_block(bar)),
+# so one stem can loop several of its bars at once. Negative = a stem.
+STEM_VOICE = -1
+STEM_BLOCK = -2
+
+
+def stem_block(bar: int) -> int:
+    """The voice key part of a stem's bar, and back (it is its own inverse)."""
+    return STEM_BLOCK - int(bar)
+
+# The shortest synced loop a marker drag may leave, in seconds.
+MIN_STEM_LOOP = 0.05
+
+
+def loop_group(group: str) -> str:
+    """The engine clock of a split's synced loop. Its stems loop together;
+    the split's other stems keep the split's own clock."""
+    return f"{group}/loop"
 FOLLOW_TIPS = {
     FOLLOW_OFF: "The canvas stays put; the playhead moves across it",
     FOLLOW_PAGE: "Scroll smoothly when the playhead reaches the right edge",
@@ -867,6 +890,7 @@ class MainWindow(QMainWindow):
                     view, indices, grabbed, shift, row
                 )
             )
+            timeline.stem_loop_dragged.connect(self._drag_stem_loop)
             timeline.row_move_requested.connect(
                 lambda index, row, view=timeline: self._move_track_to_row(index, view, row)
             )
@@ -1184,6 +1208,7 @@ class MainWindow(QMainWindow):
         without it the files are decoded here.
         """
         added = []
+        group = uuid.uuid4().hex  # these stems share one playback clock
         for stem in order:
             path = os.path.abspath(stems[stem])
             loaded = results.get(path) if results is not None else None
@@ -1198,6 +1223,7 @@ class MainWindow(QMainWindow):
                     "path": path,
                     "start": 0.0,
                     "duration": len(fields["_audio"]) / OUTPUT_RATE,
+                    "stem_group": group,
                     **fields,
                 }
             )
@@ -1543,6 +1569,8 @@ class MainWindow(QMainWindow):
                 self._push_mix(index, track)
             if self._preview_tracks:
                 self._follow_preview_tracks()
+                self._push_stem_mutes()
+            self._push_stem_loops()
         if self._preview_tracks:
             QTimer.singleShot(0, self._prune_previews)  # after the canvases redraw
 
@@ -2107,6 +2135,7 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         self.project.tracks[index]["muted"] = muted
         self._push_audible(index, self.project.tracks[index])
+        self._push_stem_mutes()
         for headers in (self.headers, self.headers2):
             headers.set_muted(index, muted)
         self.mixer.set_muted(index, muted)
@@ -2596,16 +2625,23 @@ class MainWindow(QMainWindow):
         block = view.block_at(pos)
         states = self.engine.previews()
         if block is not None:
-            state = states.get(block)
+            key = self._voice_key(*block)
+            state = states.get(key)
             playing = state is not None and state[0]
-            menu.addAction(
-                f"{'Pause' if playing else 'Play'} This Block on Its Own",
-                lambda key=block: self._toggle_block(*key),
-            )
+            if key[1] < 0:
+                play = f"{'Pause' if playing else 'Play'} This Stem in Sync"
+            else:
+                play = f"{'Pause' if playing else 'Play'} This Block on Its Own"
+            menu.addAction(play, lambda block=block: self._toggle_block(*block))
             if state is not None:
-                menu.addAction("Stop This Block", lambda key=block: self._stop_block(key))
+                stop = "Stop This Stem" if key[1] < 0 else "Stop This Block"
+                menu.addAction(stop, lambda key=key: self._stop_block(key))
         if any(view.picks() for view in self._timelines()):
             menu.addAction("Play Picked Blocks Together", self._play_picked_blocks)
+            menu.addAction("Loop Picked Stems in Sync", self._loop_picked_stems)
+        if block is not None and stem_loop(self.project.tracks[block[0]]) is not None:
+            menu.addAction("Remove This Stem from the Synced Loop", lambda index=block[0]: self._remove_from_stem_loop(index))
+            menu.addAction("Clear the Synced Loop", lambda index=block[0]: self._clear_stem_loop(index))
         if states:
             menu.addAction("Stop All Blocks", self._stop_blocks)
         if menu.actions():
@@ -2732,6 +2768,8 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         try:
             self.engine.stop()
+            self.engine.preview_stop_all()  # its voices point at the old clips
+            self._preview_tracks.clear()
             self.engine.clear_clips()
             self.project = Project.load(path)
             for track in self.project.tracks:
@@ -2879,6 +2917,8 @@ class MainWindow(QMainWindow):
             "canvas",
             "bar_block",
             "stretch",
+            "stem_group",
+            "stem_loop",
         )
         for left, right in zip(before["tracks"], after["tracks"]):
             for key in keys:
@@ -3756,31 +3796,91 @@ class MainWindow(QMainWindow):
     # loop and the scroll position are left alone; the playhead is hidden
     # while only blocks play.
 
+    # A stem of a split song (see stem_group) is one voice on its split's
+    # clock instead: the first ▶ loops that block (the picked blocks' span,
+    # if several start together) until paused. Every stem loops the block
+    # pressed on it, in step with the clock: a stem started on another bar
+    # plays that bar at the same place in the loop (a shift on the clock),
+    # and several bars of one stem can loop at once, each its own voice.
+    # A split's synced loop (stem_loop) repeats its own region instead.
+
+    def _voice_key(self, track: int, bar: int) -> tuple[int, int]:
+        tracks = self.project.tracks
+        if 0 <= track < len(tracks) and stem_group(tracks[track]):
+            if stem_loop(tracks[track]) is not None:
+                return int(track), STEM_VOICE
+            return int(track), stem_block(bar)
+        return int(track), int(bar)
+
     def _toggle_block(self, track: int, bar: int) -> None:
-        key = (int(track), int(bar))
+        key = self._voice_key(track, bar)
         state = self.engine.previews().get(key)
         if state is not None and state[0]:
             self.engine.preview_pause(key)
             self._sync_previews()
             return
-        self._start_blocks([key])
+        self._start_blocks([(track, bar)])
 
     def _start_blocks(self, keys) -> None:
-        """Start (or resume) blocks together, on the same audio sample."""
+        """Start (or resume) blocks together, on the same audio sample.
+        Stems join their split's clock; see _voice_key."""
         blocks = []
+        groups: dict[str, list] = {}  # group -> [start, members, loop, end] (song seconds)
+        spans: dict[tuple, tuple] = {}  # stem voice key -> (start, end) of its block
         for track, bar in keys:
             times = self._view_for(track).block_times(track, bar)
             if times is None:
                 continue
-            blocks.append(((track, bar), track, times[0], times[1]))
-            self._preview_tracks[(track, bar)] = (self.project.tracks[track], times)
-        if not blocks:
+            data = self.project.tracks[track]
+            group = stem_group(data)
+            if group is None:
+                blocks.append(((track, bar), track, times[0], times[1]))
+                self._preview_tracks[(track, bar)] = (data, times)
+                continue
+            # Where the block is in the song: the stem files' own time.
+            song = self._song_time(data, times[0])
+            end = self._song_time(data, times[1])
+            loop = stem_loop(data)
+            if loop is not None:
+                group = loop_group(group)  # starts at the loop start
+            entry = groups.setdefault(group, [song, {}, loop, end])
+            entry[0] = min(entry[0], song)
+            entry[3] = max(entry[3], end)
+            key = self._voice_key(track, bar)
+            spans[key] = (song, end)
+            entry[1][key] = (key, track, bool(data.get("muted", False)))
+            self._preview_tracks[key] = (data, None)
+        if not blocks and not groups:
             return
+        joining = {group for group in groups if self.engine.group_position(group) is not None}
+        for group, entry in groups.items():
+            if entry[2] is not None:
+                continue  # the split's synced loop: one region for all
+            members = entry[1]
+            if group in joining:
+                ref = self.engine.group_loop(group)
+            else:
+                # The first block sets the clock; the loop is as long as
+                # the longest block.
+                first = spans[next(iter(members))][0]
+                length = max(spans[key][1] - spans[key][0] for key in members)
+                ref = entry[2] = (first, first + length)
+                entry[0] = first
+            for key, member in members.items():
+                shift = 0.0 if ref is None else spans[key][0] - ref[0]
+                members[key] = (*member, shift)
         try:
-            self.engine.preview_play(blocks)
+            with self.engine.batch():  # everything starts on the same block
+                if blocks:
+                    self.engine.preview_play(blocks)
+                for group, (start, members, loop, end) in groups.items():
+                    self.engine.stem_play(group, list(members.values()), max(0.0, start), loop=loop)
         except Exception as exc:
             for key, *_rest in blocks:
                 self.engine.preview_stop(key)
+            for _start, members, _loop, _end in groups.values():
+                for key, *_rest in members.values():
+                    self.engine.preview_stop(key)
             self._sync_previews()
             QMessageBox.critical(self, "Audio output error", f"Could not play the block.\n\n{exc}")
             return
@@ -3788,12 +3888,147 @@ class MainWindow(QMainWindow):
         self._sync_previews()
         if not self.frame_timer.isActive():
             self.frame_timer.start()
-        if len(blocks) == 1:
+        stems = [member for _start, members, _loop, _end in groups.values() for member in members.values()]
+        if len(blocks) + len(stems) != 1:
+            self.statusBar().showMessage(f"Playing {len(blocks) + len(stems)} blocks together", 3000)
+        elif blocks:
             (track, bar), *_rest = blocks[0]
             name = self.project.tracks[track].get("name", "Track")
             self.statusBar().showMessage(f"Playing bar {bar + 1} of “{name}”", 3000)
         else:
-            self.statusBar().showMessage(f"Playing {len(blocks)} blocks together", 3000)
+            track = stems[0][1]
+            name = self.project.tracks[track].get("name", "Track")
+            how = "Joined the loop in sync" if joining else "Looping the block"
+            if stem_loop(self.project.tracks[track]) is not None:
+                how = "Joined the synced loop" if joining else "Looping in sync"
+            self.statusBar().showMessage(f"{how}: “{name}”", 3000)
+
+    # -- synced stem loops ---------------------------------------------------
+    # Picked stem blocks of one split become its synced loop: one region of
+    # the song, stored on each member track as "stem_loop" (song seconds).
+    # Members play on the loop's own engine clock (loop_group), which the
+    # audio callback wraps on the sample; the split's other stems are not in
+    # it. Markers on each member clip move the region for all of them.
+
+    @staticmethod
+    def _song_time(track, seconds: float) -> float:
+        """Arrangement ``seconds`` on a stem's clip, in its song's time."""
+        return float(track.get("offset", 0.0) or 0.0) + float(seconds) - float(track.get("start", 0.0) or 0.0)
+
+    def _loop_picked_stems(self) -> None:
+        regions: dict[str, list] = {}  # split -> [start, end, member indices]
+        tracks = self.project.tracks
+        for view in self._timelines():
+            for index, bars in view.picks().items():
+                if not (0 <= index < len(tracks)) or stem_group(tracks[index]) is None:
+                    continue
+                for bar in bars:
+                    times = view.block_times(index, bar)
+                    if times is None:
+                        continue
+                    start = self._song_time(tracks[index], times[0])
+                    end = self._song_time(tracks[index], times[1])
+                    entry = regions.setdefault(stem_group(tracks[index]), [start, end, set()])
+                    entry[0], entry[1] = min(entry[0], start), max(entry[1], end)
+                    entry[2].add(index)
+        if not regions:
+            self.statusBar().showMessage("Pick blocks of split stems to loop them in sync", 4000)
+            return
+        self._remember_edit()
+        for group, (start, end, members) in regions.items():
+            for index, track in enumerate(tracks):
+                if stem_group(track) != group:
+                    continue
+                if index in members:
+                    track["stem_loop"] = [round(start, 6), round(end, 6)]
+                else:
+                    track.pop("stem_loop", None)
+                    self._leave_stem_loop(index, group)
+        self._commit_edit()
+        self._push_stem_loops()
+        self._show_stem_loops()
+        count = sum(len(entry[2]) for entry in regions.values())
+        start, end, _members = next(iter(regions.values()))
+        self.statusBar().showMessage(
+            f"{count} stem{'s' if count != 1 else ''} loop {start:.2f}–{end:.2f} s in sync. Press ▶ on any of them", 6000
+        )
+
+    def _remove_from_stem_loop(self, index: int) -> None:
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)) or stem_loop(tracks[index]) is None:
+            return
+        self._remember_edit()
+        tracks[index].pop("stem_loop", None)
+        self._leave_stem_loop(index, stem_group(tracks[index]))
+        self._commit_edit()
+        self._push_stem_loops()
+        self._show_stem_loops()
+
+    def _clear_stem_loop(self, index: int) -> None:
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)) or stem_loop(tracks[index]) is None:
+            return
+        group = stem_group(tracks[index])
+        self._remember_edit()
+        for other, track in enumerate(tracks):
+            if stem_group(track) == group and track.pop("stem_loop", None) is not None:
+                self._leave_stem_loop(other, group)
+        self._commit_edit()
+        self._push_stem_loops()
+        self._show_stem_loops()
+
+    def _leave_stem_loop(self, index: int, group: str) -> None:
+        """A stem taken out of a loop stops if it was looping."""
+        key = (index, STEM_VOICE)
+        if key in self._preview_tracks:
+            self.engine.preview_stop(key)
+            self._sync_previews()
+
+    def _push_stem_loops(self) -> None:
+        """Each playing loop clock gets its split's current region."""
+        regions: dict[str, tuple | None] = {}
+        for track in self.project.tracks:
+            group = stem_group(track)
+            if group is not None:
+                regions[group] = regions.get(group) or stem_loop(track)
+        for group, loop in regions.items():
+            self.engine.group_set_loop(loop_group(group), loop)
+
+    def _show_stem_loops(self) -> None:
+        for timeline in self._timelines():
+            timeline.show_stem_loops(self.project.tracks)
+
+    def _drag_stem_loop(self, index: int, which: int, seconds: float, finished: bool) -> None:
+        """A loop marker on a member clip moved: the region moves for every
+        member of that split, and a playing loop takes it at once."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return
+        loop = stem_loop(tracks[index])
+        if loop is None:
+            return
+        self._remember_edit()
+        song = float(tracks[index].get("offset", 0.0) or 0.0) + float(seconds)
+        start, end = loop
+        if which == 0:
+            start = max(0.0, min(song, end - MIN_STEM_LOOP))
+        else:
+            end = max(song, start + MIN_STEM_LOOP)
+        group = stem_group(tracks[index])
+        for track in tracks:
+            if stem_group(track) == group and stem_loop(track) is not None:
+                track["stem_loop"] = [round(start, 6), round(end, 6)]
+        self.engine.group_set_loop(loop_group(group), (start, end))
+        self._show_stem_loops()
+        if finished:
+            self._commit_edit()
+            self.statusBar().showMessage(f"Synced loop: {start:.3f}–{end:.3f} s", 4000)
+
+    def _push_stem_mutes(self) -> None:
+        """A muted stem stays on its split's clock, silent."""
+        for index, bar in list(self._preview_tracks):
+            if bar < 0 and index < len(self.project.tracks):
+                self.engine.preview_set_muted((index, bar), bool(self.project.tracks[index].get("muted", False)))
 
     def _stop_block(self, key) -> None:
         self.engine.preview_stop(key)
@@ -3818,8 +4053,18 @@ class MainWindow(QMainWindow):
         for key in [key for key in self._preview_tracks if key not in states]:
             del self._preview_tracks[key]
         shown = self.engine.playing or not states
+        blocks = {}
+        for (track, bar), state in states.items():
+            if bar == STEM_VOICE:
+                # A looping stem shows on the block its clock is in now.
+                bar = self._view_for(track).block_at_time(track, state[1])
+                if bar is None:
+                    continue
+            elif bar < 0:
+                bar = stem_block(bar)
+            blocks[(track, bar)] = state
         for timeline in self._timelines():
-            timeline.set_previews(states)
+            timeline.set_previews(blocks)
             timeline.set_playhead_visible(shown)
         return states
 
@@ -3848,6 +4093,11 @@ class MainWindow(QMainWindow):
         tracks = self.project.tracks
         for key, (track, times) in list(self._preview_tracks.items()):
             index, bar = key
+            if bar < 0:
+                # A stem follows its clock wherever its clip is moved.
+                if index >= len(tracks) or tracks[index] is not track:
+                    self.engine.preview_stop(key)
+                continue
             current = self._view_for(index).block_times(index, bar) if index < len(tracks) else None
             if (
                 index >= len(tracks)

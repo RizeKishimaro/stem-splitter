@@ -17,20 +17,100 @@ HEARD_BLOCKS = 16
 # song itself plays and exports exactly as before.
 LIMIT_CEILING = 0.98
 LIMIT_RELEASE_SECONDS = 0.25
+# A stem loop's wrap crossfades this many samples (about 1.5 ms): the loop
+# start fades in while the audio just past the loop end fades out, so the
+# jump has no click and the cycle stays exactly end - start samples long.
+LOOP_XFADE = 64
 
 
 class _Voice:
-    """One stem block played on its own, apart from the transport."""
+    """One stem block played on its own, apart from the transport.
 
-    __slots__ = ("key", "clip", "start", "end", "cursor", "playing")
+    A voice with a ``group`` is a stem of a split song. It has no cursor of
+    its own: it plays the frame of its file that the group's clock is on,
+    so every stem of one split stays on the same sample. ``shift`` (frames)
+    moves it to another place in its file on the same clock: a stem looping
+    bar 5 while the clock loops bar 2 plays bar 5 in step with it.
+    """
 
-    def __init__(self, key, clip: int, start: int, end: int):
+    __slots__ = ("key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift")
+
+    def __init__(self, key, clip: int, start: int, end: int, group=None):
         self.key = key
         self.clip = int(clip)
         self.start = int(start)
         self.end = int(end)
         self.cursor = int(start)
         self.playing = True
+        self.group = group
+        self.muted = False
+        self.shift = 0
+
+
+class _Group:
+    """The shared clock of one split's stems: a frame in the source song
+    (the stem files' own time, at OUTPUT_RATE). It moves on by each audio
+    block while any member plays and holds while all are paused.
+
+    With a ``loop`` (start, end frames) the clock wraps from end to start
+    inside the audio callback, on the exact sample, for every member at
+    once. ``fading`` is set from a wrap until the crossfade is done."""
+
+    __slots__ = ("key", "cursor", "running", "loop", "fading", "segments", "next_cursor", "next_fading")
+
+    def __init__(self, key, cursor: int, loop=None):
+        self.key = key
+        self.cursor = int(cursor)
+        self.running = False
+        self.loop = loop
+        self.fading = False
+        self.segments = ()
+        self.next_cursor = self.cursor
+        self.next_fading = False
+
+    def plan(self, frames: int) -> None:
+        """This block as ``(frame, span, fading)`` runs of the clock, and
+        where the clock is after it. Wraps at the loop end; a loop moved
+        to before the clock wraps on this block."""
+        loop = self.loop
+        cursor = self.cursor
+        fading = self.fading
+        segments = []
+        remaining = int(frames)
+        while remaining > 0:
+            if loop is not None and cursor >= loop[1]:
+                cursor = loop[0]
+                fading = True
+            span = remaining if loop is None else min(remaining, loop[1] - cursor)
+            segments.append((cursor, span, fading))
+            cursor += span
+            remaining -= span
+            if fading and (loop is None or cursor >= loop[0] + _xfade(loop)):
+                fading = False
+        self.segments = segments
+        self.next_cursor = cursor
+        self.next_fading = fading
+
+
+def _loop_frames(loop):
+    """``(start, end)`` seconds as frames, or None for no (or an empty) loop."""
+    if loop is None:
+        return None
+    start = max(0, int(round(float(loop[0]) * OUTPUT_RATE)))
+    end = int(round(float(loop[1]) * OUTPUT_RATE))
+    return (start, end) if end > start else None
+
+
+def _xfade(loop) -> int:
+    return max(0, min(LOOP_XFADE, (loop[1] - loop[0]) // 4))
+
+
+def _wrap(frame: float, loop) -> float:
+    """``frame`` folded into the loop, for frames past its end."""
+    if loop is None or frame < loop[1]:
+        return frame
+    return loop[0] + (frame - loop[0]) % (loop[1] - loop[0])
+
 
 def mix_clip_into(out, clip, start) -> float:
     """Add one clip's sound for ``len(out)`` frames from arrangement frame
@@ -117,6 +197,10 @@ class AudioEngine:
         self._track_peaks = []
         self._master_peak = 0.0
         self._scratch = np.zeros((BLOCK_SIZE, 2), dtype=np.float32)
+        # Loop crossfade buffers, made once so a wrap allocates no audio.
+        self._fade_head = np.zeros((LOOP_XFADE, 2), dtype=np.float32)
+        self._fade_tail = np.zeros((LOOP_XFADE, 2), dtype=np.float32)
+        self._fade_ramp = np.arange(LOOP_XFADE, dtype=np.float32) / LOOP_XFADE
         self._loop_start = None
         self._loop_end = None
         # What the speakers play and when, for drawing the playhead: one
@@ -129,6 +213,10 @@ class AudioEngine:
         # a tuple swapped in whole, so it never waits on the audio thread.
         self._voices: dict = {}
         self._preview_view: dict = {}
+        # Stem groups by key, and their clocks for the UI: key -> (running,
+        # cursor, sounds at), swapped in whole like ``_preview_view``.
+        self._groups: dict = {}
+        self._group_view: dict = {}
         self._limit_gain = 1.0
 
     @property
@@ -422,26 +510,101 @@ class AudioEngine:
 
     def _mix_voices(self, outdata, frames: int, sounds_at: float) -> None:
         """Add every playing preview voice. Each reads the clip's audio that
-        is already in memory; nothing here decodes or touches the disk."""
+        is already in memory; nothing here decodes or touches the disk.
+
+        Stem voices read their group's clock, and every group moves on only
+        after all its members are mixed, so stems that join late land on
+        the same sample as the ones already playing. A looping group wraps
+        mid-block where its loop ends, the same for every member."""
         clips = self._clips
+        groups = self._groups
         finished = []
+        for group in groups.values():
+            group.running = False
+            group.plan(frames)
         for key, voice in self._voices.items():
-            if not voice.playing:
-                continue
             if not (0 <= voice.clip < len(clips)):
                 finished.append(key)
                 continue
-            count = min(frames, voice.end - voice.cursor)
-            if count > 0:
-                peak = mix_clip_into(outdata[:count], clips[voice.clip], voice.cursor)
-                if voice.clip < len(self._track_peaks) and peak > self._track_peaks[voice.clip]:
-                    self._track_peaks[voice.clip] = peak
-                voice.cursor += count
-            if voice.cursor >= voice.end:
-                finished.append(key)
+            clip = clips[voice.clip]
+            if voice.group is not None:
+                group = groups.get(voice.group)
+                if group is None:
+                    finished.append(key)
+                    continue
+                offset = int(clip.get("offset", 0))
+                end = offset + int(clip.get("length", len(clip["audio"]) - offset))
+                if group.loop is None and group.cursor + voice.shift >= end:
+                    finished.append(key)
+                    continue
+                if not voice.playing:
+                    continue
+                group.running = True
+                if voice.muted:
+                    continue
+                peak = self._mix_stem(outdata, clip, clip["start"] - offset + voice.shift, group)
+            else:
+                if not voice.playing:
+                    continue
+                count = min(frames, voice.end - voice.cursor)
+                peak = 0.0
+                if count > 0:
+                    peak = mix_clip_into(outdata[:count], clip, voice.cursor)
+                    voice.cursor += count
+                if voice.cursor >= voice.end:
+                    finished.append(key)
+            if voice.clip < len(self._track_peaks) and peak > self._track_peaks[voice.clip]:
+                self._track_peaks[voice.clip] = peak
+        for group in groups.values():
+            if group.running:
+                group.cursor = group.next_cursor
+                group.fading = group.next_fading
         for key in finished:
             del self._voices[key]
+        if finished:
+            self._drop_empty_groups()
         self._publish_previews(sounds_at)
+
+    def _mix_stem(self, outdata, clip, base: int, group) -> float:
+        """One stem along its group's runs for this block. ``base`` turns a
+        file frame into the clip's arrangement frame."""
+        peak = 0.0
+        filled = 0
+        loop = group.loop
+        for frame, span, fading in group.segments:
+            target = outdata[filled : filled + span]
+            faded = 0
+            if fading and loop is not None:
+                into = frame - loop[0]
+                faded = max(0, min(span, _xfade(loop) - into))
+                if faded:
+                    self._mix_crossfade(target[:faded], clip, base, frame, loop, into)
+            if span > faded:
+                peak = max(peak, mix_clip_into(target[faded:], clip, base + frame + faded))
+            filled += span
+        return peak
+
+    def _mix_crossfade(self, target, clip, base: int, frame: int, loop, into: int) -> None:
+        """The loop start fading in over the audio just past the loop end
+        fading out (equal gain: the two are the same take, so they add)."""
+        count = len(target)
+        length = _xfade(loop)
+        head = self._fade_head[:count]
+        tail = self._fade_tail[:count]
+        head.fill(0)
+        tail.fill(0)
+        mix_clip_into(head, clip, base + frame)
+        mix_clip_into(tail, clip, base + loop[1] + into)
+        rise = self._fade_ramp[into : into + count] * (LOOP_XFADE / max(1, length))
+        head -= tail
+        head *= rise[:, None]
+        head += tail
+        target += head
+
+    def _drop_empty_groups(self) -> None:
+        used = {voice.group for voice in self._voices.values()}
+        for key in [key for key in self._groups if key not in used]:
+            del self._groups[key]
 
     def _limit(self, outdata, frames: int) -> None:
         """Peak limiter for stacked preview voices: instant attack, smooth
@@ -462,10 +625,29 @@ class AudioEngine:
 
     def _publish_previews(self, sounds_at: float | None = None) -> None:
         when = time.monotonic() if sounds_at is None else sounds_at
-        self._preview_view = {
-            key: (voice.playing, voice.start, voice.end, voice.cursor, when)
-            for key, voice in self._voices.items()
-        }
+        clips = self._clips
+        groups = self._groups
+        view = {}
+        for key, voice in self._voices.items():
+            if voice.group is None:
+                view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, 0, when, None)
+                continue
+            group = groups.get(voice.group)
+            if group is None or not (0 <= voice.clip < len(clips)):
+                continue
+            clip = clips[voice.clip]
+            offset = int(clip.get("offset", 0))
+            end = offset + int(clip.get("length", len(clip["audio"]) - offset))
+            # File frames, shown in arrangement time on this clip.
+            # A paused stem shows where it was paused (``cursor``), still.
+            moving = voice.playing and group.running
+            view[key] = (
+                voice.playing, moving, offset - voice.shift, end - voice.shift,
+                group.cursor if voice.playing else voice.cursor,
+                clip["start"] - offset + voice.shift, when, group.loop,
+            )
+        self._preview_view = view
+        self._group_view = {key: (group.running, group.cursor, when, group.loop) for key, group in groups.items()}
 
     def _sounds_at(self, time_info) -> float:
         """Monotonic time at which the block being written starts to sound."""
@@ -519,16 +701,110 @@ class AudioEngine:
             self._publish_previews()
         self._ensure_stream()
 
+    def stem_play(self, group, members, start_seconds: float = 0.0, loop=None) -> None:
+        """Start or resume stems of one split on the group's shared clock.
+
+        ``members`` is a list of ``(key, clip index)``, ``(key, clip
+        index, muted)`` or ``(key, clip index, muted, shift seconds)``: a
+        shift plays that much later in the stem's file on the same clock
+        (see ``_Voice``). If the group is not playing yet its clock starts at
+        ``start_seconds`` of the source song (the stem files' own time);
+        otherwise the stems join it where it is now, on the next audio
+        block, sample-aligned with the stems already playing. A paused stem
+        resumes at the shared position, not where it paused. Other groups
+        and block voices are not touched. Raises if the audio output cannot
+        start.
+
+        ``loop`` is ``(start, end)`` seconds of the source song: the group
+        then repeats that region, wrapping on the sample (see
+        ``group_set_loop``). A new looping group starts at the loop start.
+        """
+        frames = _loop_frames(loop)
+        with self._lock:
+            if group not in self._groups:
+                first = max(0, int(round(float(start_seconds) * OUTPUT_RATE)))
+                if frames is not None:
+                    first = frames[0]
+                self._groups[group] = _Group(group, first, frames)
+            elif loop is not None:
+                self._groups[group].loop = frames
+            for member in members:
+                key, clip = member[0], int(member[1])
+                voice = self._voices.get(key)
+                if voice is None or voice.group != group:
+                    voice = _Voice(key, clip, 0, 0, group)
+                    self._voices[key] = voice
+                voice.clip = clip
+                voice.playing = True
+                if len(member) > 2:
+                    voice.muted = bool(member[2])
+                if len(member) > 3:
+                    voice.shift = int(round(float(member[3]) * OUTPUT_RATE))
+            self._drop_empty_groups()
+            self._publish_previews()
+        self._ensure_stream()
+
+    def group_set_loop(self, group, loop) -> None:
+        """Change a playing group's loop to ``(start, end)`` seconds of the
+        source song, or None to stop looping. Safe while it plays: the
+        callback picks it up on its next block; a clock already past the
+        new end wraps to the new start there, crossfaded. A group that is
+        not playing is left alone."""
+        frames = _loop_frames(loop)
+        with self._lock:
+            state = self._groups.get(group)
+            if state is not None:
+                state.loop = frames
+                if frames is None:
+                    state.fading = False
+                self._publish_previews()
+
+    def group_loop(self, group):
+        """A playing group's loop as ``(start, end)`` seconds of the source
+        song, or None. Lock-free."""
+        state = self._group_view.get(group)
+        if state is None or state[3] is None:
+            return None
+        return state[3][0] / OUTPUT_RATE, state[3][1] / OUTPUT_RATE
+
+    def preview_set_muted(self, key, muted: bool) -> None:
+        """Silence a stem voice without leaving its group's clock."""
+        with self._lock:
+            voice = self._voices.get(key)
+            if voice is not None:
+                voice.muted = bool(muted)
+
+    def group_position(self, group, now: float | None = None) -> float | None:
+        """Seconds of the source song a stem group's clock is heard at
+        ``now``, or None when the group is not playing. Lock-free."""
+        state = self._group_view.get(group)
+        if state is None:
+            return None
+        running, cursor, sounds_at, loop = state
+        frame = cursor
+        if running:
+            now = time.monotonic() if now is None else float(now)
+            frame = max(0.0, cursor - BLOCK_SIZE + (now - sounds_at) * OUTPUT_RATE)
+            if loop is not None and frame < loop[0] <= cursor:
+                frame += loop[1] - loop[0]
+            frame = _wrap(frame, loop)
+        return frame / OUTPUT_RATE
+
     def preview_pause(self, key) -> None:
         with self._lock:
             voice = self._voices.get(key)
             if voice is not None:
+                if voice.group is not None and voice.playing:
+                    heard = self.group_position(voice.group)
+                    if heard is not None:
+                        voice.cursor = int(round(heard * OUTPUT_RATE))
                 voice.playing = False
             self._publish_previews()
 
     def preview_stop(self, key) -> None:
         with self._lock:
             self._voices.pop(key, None)
+            self._drop_empty_groups()
             self._publish_previews()
 
     def preview_retarget(self, changes: dict) -> None:
@@ -549,6 +825,7 @@ class AudioEngine:
     def preview_stop_all(self) -> None:
         with self._lock:
             self._voices.clear()
+            self._groups.clear()
             self._publish_previews()
 
     def previews(self, now: float | None = None) -> dict:
@@ -556,6 +833,7 @@ class AudioEngine:
 
         Lock-free, like ``heard_position``: the seconds are what is heard at
         ``now``, interpolated between audio blocks and inside the block.
+        A stem voice's seconds are in arrangement time on its own clip.
         A finished or stopped voice is absent.
         """
         view = self._preview_view
@@ -563,13 +841,16 @@ class AudioEngine:
             return {}
         now = time.monotonic() if now is None else float(now)
         shown = {}
-        for key, (playing, start, end, cursor, sounds_at) in view.items():
+        for key, (playing, moving, start, end, cursor, base, sounds_at, loop) in view.items():
             frame = cursor
-            if playing:
+            if moving:
                 # ``cursor`` is the end of the last block written; that block
                 # starts sounding at ``sounds_at``.
                 frame = cursor - BLOCK_SIZE + (now - sounds_at) * OUTPUT_RATE
-            shown[key] = (playing, min(end, max(start, frame)) / OUTPUT_RATE)
+                if loop is not None and frame < loop[0] <= cursor:
+                    frame += loop[1] - loop[0]  # still the last cycle
+                frame = _wrap(frame, loop)
+            shown[key] = (playing, (base + min(end, max(start, frame))) / OUTPUT_RATE)
         return shown
 
     def _ensure_stream(self) -> None:
@@ -590,6 +871,7 @@ class AudioEngine:
         with self._lock:
             self._playing = False
             self._voices.clear()
+            self._groups.clear()
             self._publish_previews()
             stream, self._stream = self._stream, None
         if stream is not None:

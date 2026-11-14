@@ -53,6 +53,27 @@ def track_canvas(track) -> int:
         return int(track.get("canvas", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def stem_group(track) -> str | None:
+    """The split operation a stem track came from, or None. Bar blocks cut
+    from a stem keep it, so they stay in sync wherever they are moved."""
+    group = track.get("stem_group")
+    return str(group) if group else None
+
+
+def stem_loop(track) -> tuple[float, float] | None:
+    """The synced loop a stem takes part in: ``(start, end)`` seconds of
+    its source song (the stem files' own time), or None."""
+    loop = track.get("stem_loop")
+    if not stem_group(track) or not isinstance(loop, (list, tuple)) or len(loop) != 2:
+        return None
+    try:
+        start, end = float(loop[0]), float(loop[1])
+    except (TypeError, ValueError):
+        return None
+    return (start, end) if end > start else None
+
 HEADER_WIDTH = 0
 PIXELS_PER_SECOND = 90.0
 RULER_HEIGHT = 32
@@ -73,6 +94,10 @@ PLAYHEAD_EDGE = QColor("#0C0D10")
 PREVIEW_TINT = QColor(120, 200, 150, 40)
 PREVIEW_PAUSED_TINT = QColor(200, 200, 200, 22)
 PREVIEW_EDGE = QColor("#8FE0A8")
+# A stem's synced loop: the region tint and its two draggable markers.
+STEM_LOOP_TINT = QColor(92, 200, 220, 34)
+STEM_LOOP_EDGE = QColor("#5CC8DC")
+STEM_LOOP_GRAB = 6.0  # pixels either side of a marker that grab it
 PREVIEW_CURSOR = QColor("#E9FFF0")
 CLIP_HEIGHT = 54
 CLIP_TOP = 10
@@ -251,6 +276,12 @@ class ClipItem(QGraphicsRectItem):
         self._preview: dict[int, tuple[bool, float]] = {}
         self.block_drag_callback = None
         self.block_drop_callback = None
+        # The synced loop as clip-local x (start, end), and its marker drag:
+        # ``stem_loop_callback(clip, which, local seconds, finished)`` with
+        # which 0 for the start marker and 1 for the end.
+        self._stem_loop: tuple[float, float] | None = None
+        self.stem_loop_callback = None
+        self._loop_handle = None
         # Called on release with (clip, scene position, scene position of the
         # press); returns True when it took the drop (the other canvas).
         self.canvas_drop_callback = None
@@ -389,6 +420,8 @@ class ClipItem(QGraphicsRectItem):
                     painter.drawRect(block)
         if self._preview:
             self._paint_preview(painter)
+        if self._stem_loop is not None:
+            self._paint_stem_loop(painter)
         if self._hidden_span is not None:
             left, right = self._hidden_span
             painter.setPen(Qt.PenStyle.NoPen)
@@ -460,6 +493,51 @@ class ClipItem(QGraphicsRectItem):
             painter.setPen(QPen(PREVIEW_EDGE if playing else CLIP_EDGE, 1.5))
             painter.drawRect(block.adjusted(1, 1, -1, -1))
             painter.fillRect(QRectF(x - 1.0, 1, 2.0, height - 2), PREVIEW_CURSOR)
+
+    def set_stem_loop(self, span) -> None:
+        """Show this stem's synced loop: clip-local ``(x0, x1)``, or None."""
+        span = None if span is None else (round(float(span[0]), 2), round(float(span[1]), 2))
+        if span == self._stem_loop:
+            return
+        self._stem_loop = span
+        self.update()
+
+    def _paint_stem_loop(self, painter) -> None:
+        x0, x1 = self._stem_loop
+        width = float(self.rect().width())
+        height = self.rect().height()
+        left, right = max(0.0, x0), min(width, x1)
+        if right > left:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(STEM_LOOP_TINT)
+            painter.drawRect(QRectF(left, 0, right - left, height))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(STEM_LOOP_EDGE)
+        for x, flag in ((x0, 7.0), (x1, -7.0)):
+            if 0.0 <= x <= width:
+                painter.fillRect(QRectF(x - 1.0, 0, 2.0, height), STEM_LOOP_EDGE)
+                # A flag pointing into the loop: the marker's grip.
+                painter.drawPolygon(QPolygonF([QPointF(x, 0), QPointF(x + flag, 0), QPointF(x, 9)]))
+
+    def _loop_handle_at(self, x: float):
+        if self._stem_loop is None or self.stem_loop_callback is None:
+            return None
+        width = float(self.rect().width())
+        best, distance = None, STEM_LOOP_GRAB
+        for which, marker in enumerate(self._stem_loop):
+            if -1.0 <= marker <= width + 1.0 and abs(marker - x) <= distance:
+                best, distance = which, abs(marker - x)
+        return best
+
+    def _loop_marker_x(self, x: float, free: bool) -> float:
+        """A dragged marker snaps to bar edges within a few pixels; Shift
+        places it freely."""
+        if not free:
+            for span in self._block_spans:
+                for edge in (float(span[1]), float(span[2])):
+                    if abs(edge - x) <= 8.0:
+                        return edge
+        return x
 
     def _span_at(self, x: float):
         for span in self._block_spans:
@@ -616,7 +694,9 @@ class ClipItem(QGraphicsRectItem):
         return None
 
     def hoverMoveEvent(self, event):
-        if self._edge_at(event.pos().x()):
+        if self._loop_handle_at(event.pos().x()) is not None:
+            cursor = Qt.CursorShape.SplitHCursor
+        elif self._edge_at(event.pos().x()):
             cursor = Qt.CursorShape.SizeHorCursor
         elif len(self._block_spans) > 1:
             cursor = Qt.CursorShape.OpenHandCursor
@@ -649,6 +729,13 @@ class ClipItem(QGraphicsRectItem):
         self._press_play = (
             self._play_button_at(event.pos()) if event.button() == Qt.MouseButton.LeftButton else None
         )
+        if event.button() == Qt.MouseButton.LeftButton and self._press_play is None:
+            handle = self._loop_handle_at(event.pos().x())
+            if handle is not None:
+                # A loop marker: dragging it moves that end of the loop only.
+                self._loop_handle = handle
+                event.accept()
+                return
         # The downbeat marker is the top of the clip. The trim handles stay
         # on the lower part of the same edge. A click on a marker opens its
         # menu on release; pressing it and moving drags the clip, since the
@@ -734,6 +821,12 @@ class ClipItem(QGraphicsRectItem):
         return press is None or (QPointF(scene_pos) - press).manhattanLength() >= QApplication.startDragDistance()
 
     def mouseMoveEvent(self, event):
+        if self._loop_handle is not None:
+            free = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            x = self._loop_marker_x(event.pos().x(), free)
+            self.stem_loop_callback(self, self._loop_handle, x / self.pixels_per_second, False)
+            event.accept()
+            return
         if self._press_play is not None:
             event.accept()  # a press on ▶ / ⏸ does not drag
             return
@@ -770,6 +863,15 @@ class ClipItem(QGraphicsRectItem):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._loop_handle is not None:
+            handle, self._loop_handle = self._loop_handle, None
+            free = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            x = self._loop_marker_x(event.pos().x(), free)
+            self._press_play = None
+            self._press_scene = None
+            self.stem_loop_callback(self, handle, x / self.pixels_per_second, True)
+            event.accept()
+            return
         button, self._press_play = getattr(self, "_press_play", None), None
         marker, self._press_downbeat = getattr(self, "_press_downbeat", None), None
         press = getattr(self, "_press_scene", None)
@@ -1025,6 +1127,9 @@ class TimelineView(QGraphicsView):
     # Track index and display row: a whole clip dropped on another row of
     # this canvas (a row past the last one means a new row).
     row_move_requested = Signal(int, int)
+    # A synced-loop marker dragged: track, 0 start / 1 end, seconds into
+    # the clip, and whether the drag is finished.
+    stem_loop_dragged = Signal(int, int, float, bool)
 
     def __init__(self, parent=None, canvas: int = 0):
         super().__init__(parent)
@@ -1410,6 +1515,8 @@ class TimelineView(QGraphicsView):
             clip.group_drag = self._drag_group
             clip.group_drop = self._drop_group
             clip.drag_move = self._preview_on_peer
+            clip.stem_loop_callback = self._stem_loop_moved
+            self._show_stem_loop(clip, track)
             if track.get("bar_block"):
                 # A placed bar can land on top of other audio on its row. It
                 # is drawn, and grabbed, above it.
@@ -2043,6 +2150,36 @@ class TimelineView(QGraphicsView):
         for span in self._spans_of(clip):
             if span[0] == bar and span[4] > span[3]:
                 return start + float(span[3]), start + float(span[4])
+        return None
+
+    def _stem_loop_moved(self, clip, which: int, seconds: float, finished: bool) -> None:
+        self.stem_loop_dragged.emit(clip.clip_index, int(which), float(seconds), bool(finished))
+
+    def _show_stem_loop(self, clip, track) -> None:
+        loop = stem_loop(track)
+        if loop is None:
+            clip.set_stem_loop(None)
+            return
+        offset = float(track.get("offset", 0.0) or 0.0)
+        pps = self.pixels_per_second
+        clip.set_stem_loop(((loop[0] - offset) * pps, (loop[1] - offset) * pps))
+
+    def show_stem_loops(self, tracks) -> None:
+        """Redraw every clip's synced-loop markers from ``tracks``, without
+        a rebuild (while a marker is dragged)."""
+        for clip in self._clip_items():
+            if 0 <= clip.clip_index < len(tracks):
+                self._show_stem_loop(clip, tracks[clip.clip_index])
+
+    def block_at_time(self, index: int, seconds: float) -> int | None:
+        """The bar of track ``index``'s block at arrangement ``seconds``."""
+        clip = self._clip_for(index)
+        if clip is None:
+            return None
+        local = float(seconds) - (float(clip.pos().x()) - HEADER_WIDTH) / self.pixels_per_second
+        for span in self._spans_of(clip):
+            if span[3] <= local < span[4]:
+                return int(span[0])
         return None
 
     def block_at(self, view_pos) -> tuple[int, int] | None:
