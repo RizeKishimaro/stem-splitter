@@ -794,7 +794,7 @@ class SecondCanvasTests(unittest.TestCase):
         window._undo()
         self.assertEqual(self.track("drums · bar 2").get("canvas"), 1)
 
-    def test_ctrl_box_adds_bars_and_a_click_elsewhere_clears(self):
+    def test_ctrl_box_adds_bars_and_a_click_adds_another(self):
         window = self.window
         view = window.timeline
         view.resize(1400, 400)
@@ -806,10 +806,11 @@ class SecondCanvasTests(unittest.TestCase):
         self.box(view, QPointF(6.5 * PIXELS_PER_SECOND, under), QPointF(6.6 * PIXELS_PER_SECOND, bass.pos().y() + 10),
                  Qt.KeyboardModifier.ControlModifier)
         self.assertEqual(view.picks(), {0: {1}, 1: {1, 3}})
-        # A plain press on an unpicked part of a clip clears the bars.
+        # A plain click on a bar the box missed adds that bar. The stems
+        # already picked stay picked.
         point = QPointF(drums.pos().x() + 0.5 * PIXELS_PER_SECOND, drums.pos().y() + drums.rect().height() * 0.75)
         self.drag(view, point, view, point)
-        self.assertEqual(view.picks(), {})
+        self.assertEqual(view.picks(), {0: {0, 1}, 1: {1, 3}})
 
     def test_dragged_selection_is_outlined_on_the_other_canvas(self):
         # Picked bar blocks of two stems move to canvas 2 together.

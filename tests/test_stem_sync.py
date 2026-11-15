@@ -517,7 +517,7 @@ class SharedClockWindowTests(unittest.TestCase):
         self.click_block(self.index(vocals), 2, ctrl)
         # One block each, not whole clips.
         self.assertEqual(view.picks(), {self.index(drums): {1}, self.index(bass): {3}, self.index(vocals): {1, 2}})
-        self.assertEqual(view.selected_indices(), [self.index(other)])  # from its ▶; Ctrl added no clips
+        self.assertEqual(view.selected_indices(), [])  # ▶ and Ctrl pick bars, not whole clips
         self.click_block(self.index(bass), 3, ctrl)  # Ctrl+click again: unpicked
         self.assertEqual(view.picks(), {self.index(drums): {1}, self.index(vocals): {1, 2}})
         self.click(self.index(drums), 1)  # ▶ on one picked block plays them all, and only them
@@ -752,6 +752,400 @@ class SharedClockWindowTests(unittest.TestCase):
         median = float(np.median(costs))
         print(f"\n  UI frame with 8 stem voices: median {median * 1000:.2f} ms", end="")
         self.assertLess(median, 0.016)
+
+    def test_a_split_piece_plays_through_instead_of_restarting_halfway(self):
+        drums, *_rest = self.split("Song")
+        index = self.index(drums)
+        self.engine.seek(4.0)
+        self.window._selected = index
+        self.window._split_selected()
+        self.app.processEvents()
+        # The head is the first 4 s, drawn as two bars. ▶ on the first bar
+        # used to loop that bar, so the piece restarted at its midpoint.
+        self.press(index, 0)
+        group = stem_group(self.window.project.tracks[index])
+        self.assertEqual(self.engine._groups[group].loop, (0, 4 * OUTPUT_RATE))
+        voice = self.engine._voices[(index, stem_block(0))]
+        self.assertEqual(voice.length, 4 * OUTPUT_RATE)
+        mixed = self.mix(4 * OUTPUT_RATE // BLOCK)
+        # Still climbing at 3.5 s. A restart at 2 s would be back near the start.
+        at = int(3.5 * OUTPUT_RATE)
+        self.assertGreater(float(mixed[at]), 0.007)
+        self.assertLess(abs(float(mixed[at]) - at * STEP), 0.001)
+        # The other half plays its own 4 s, not its first bar.
+        self.engine.preview_stop_all()
+        self.window._preview_tracks.clear()
+        tail = next(i for i, track in enumerate(self.window.project.tracks) if track.get("start") == 4.0 and track.get("path") == drums["path"])
+        bar = self.window._view_for(tail).block_at_time(tail, 4.5)
+        self.press(tail, bar)
+        self.assertEqual(self.engine._groups[group].loop, (4 * OUTPUT_RATE, 8 * OUTPUT_RATE))
+        mixed = self.mix(4 * OUTPUT_RATE // BLOCK)
+        at = int(1.5 * OUTPUT_RATE)  # 1.5 s into the tail is 5.5 s of the file
+        file_frame = 4 * OUTPUT_RATE + at
+        self.assertLess(abs(float(mixed[at]) - file_frame * STEP), 0.001)
+
+    def test_a_bar_moved_out_does_not_make_the_stem_beside_it_play_the_whole_track(self):
+        drums, *_rest = self.split("Song")
+        index = self.index(drums)
+        view = self.window._view_for(index)
+        # Grab bar 1 and move it. The stem beside it is the rest of the track.
+        self.window._move_blocks(view, [(index, 2.0, 2.0, 1)], 0, 2.0, 0, 6)
+        self.app.processEvents()
+        tracks = self.window.project.tracks
+        grabbed = next(i for i, track in enumerate(tracks) if track.get("bar_block") and track.get("path") == drums["path"])
+        beside = next(
+            i for i, track in enumerate(tracks)
+            if track.get("path") == drums["path"] and not track.get("bar_block") and float(track["start"]) < 2.0
+        )
+        bar = self.window._view_for(beside).block_at_time(beside, float(tracks[beside]["start"]) + 0.4)
+        self.press(beside, bar)
+        group = stem_group(tracks[beside])
+        loop = self.engine._groups[group].loop
+        self.assertEqual(loop[1] - loop[0], 2 * OUTPUT_RATE)
+        self.engine.preview_stop_all()
+        self.window._preview_tracks.clear()
+        grabbed_bar = self.window._view_for(grabbed).block_at_time(grabbed, float(tracks[grabbed]["start"]) + 0.4)
+        self.press(grabbed, grabbed_bar)
+        loop = self.engine._groups[group].loop
+        self.assertEqual(loop[1] - loop[0], 2 * OUTPUT_RATE)
+
+    def test_a_scissor_shows_on_every_bar_and_splits_that_bar_in_half(self):
+        from soniclab.ui.timeline import BarPlayButton, HalfSplitButton
+
+        drums, *_rest = self.split("Song")
+        index = self.index(drums)
+        view = self.window._view_for(index)
+        clip = view._clip_for(index)
+        scissors = [child for child in clip.childItems() if isinstance(child, HalfSplitButton)]
+        # One scissor in each bar, before anything is dragged out.
+        self.assertGreaterEqual(len(scissors), 4)
+        xs = sorted(child.pos().x() for child in scissors)
+        self.assertGreater(xs[-1] - xs[0], clip.rect().width() * 0.5)
+        first = min(scissors, key=lambda child: child.local_start)
+        self.assertAlmostEqual(first.local_start, 0.0, places=2)
+        self.assertAlmostEqual(first.local_duration, 2.0, places=2)
+        play = next(child for child in clip.childItems() if isinstance(child, BarPlayButton) and child.index == 0)
+        self.assertLess(abs(first.pos().y() - play.pos().y()), 1.0)
+        view.centerOn(first)
+        self.app.processEvents()
+        point = view.mapFromScene(first.sceneBoundingRect().center())
+        QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+        self.app.processEvents()
+        self.assertEqual(self.engine.previews(), {})
+        tracks = self.window.project.tracks
+        same = [i for i, track in enumerate(tracks) if track.get("path") == drums["path"]]
+        halves = [i for i in same if tracks[i].get("bar_block")]
+        rest = [i for i in same if not tracks[i].get("bar_block")]
+        self.assertEqual(len(halves), 2)
+        self.assertEqual(sorted(round(tracks[i]["duration"], 3) for i in halves), [1.0, 1.0])
+        self.assertEqual(len(rest), 1)
+        self.assertAlmostEqual(tracks[rest[0]]["duration"], 6.0)
+        self.assertAlmostEqual(tracks[rest[0]]["start"], 2.0)
+        rows, _primaries = view.lane_rows(tracks)
+        self.assertEqual(rows[halves[0]], rows[halves[1]])
+        self.assertEqual(rows[halves[0]], rows[rest[0]])
+        left, right = sorted(halves, key=lambda i: tracks[i]["start"])
+        self.assertAlmostEqual(tracks[left]["start"], 0.0)
+        self.assertAlmostEqual(tracks[right]["start"], 1.0)
+        self.assertAlmostEqual(view._clip_for(left).pos().y(), view._clip_for(rest[0]).pos().y())
+        self.assertAlmostEqual(view._clip_for(right).pos().y(), view._clip_for(rest[0]).pos().y())
+        for piece in halves:
+            item = view._clip_for(piece)
+            self.assertTrue(any(isinstance(child, BarPlayButton) for child in item.childItems()))
+            self.assertTrue(any(isinstance(child, HalfSplitButton) for child in item.childItems()))
+        kept = view._clip_for(rest[0])
+        self.assertGreaterEqual(sum(isinstance(child, HalfSplitButton) for child in kept.childItems()), 3)
+        view.set_picks({})
+        view.scene_obj.clearSelection()
+        bar = view.block_at_time(rest[0], float(tracks[rest[0]]["start"]) + 0.4)
+        self.press(rest[0], bar)
+        group = stem_group(tracks[rest[0]])
+        loop = self.engine._groups[group].loop
+        self.assertEqual(loop[1] - loop[0], 2 * OUTPUT_RATE)
+
+    def test_a_later_left_click_keeps_the_drag_selected_stems(self):
+        drums, bass, _other, _vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        first = view._clip_for(self.index(drums)).sceneBoundingRect()
+        last = view._clip_for(self.index(bass)).sceneBoundingRect()
+        pps = view.pixels_per_second
+        rows = [view._clip_for(i).sceneBoundingRect() for i in range(len(self.window.project.tracks))]
+        bottom = max(r.bottom() for r in rows) + 20
+        x0 = first.left() + 2.3 * pps
+        x1 = first.left() + 5.7 * pps
+        start = view.mapFromScene(x0, bottom)
+        end = view.mapFromScene(x1, last.center().y())
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        self.app.processEvents()
+        picked = view.picks()
+        self.assertEqual(picked.get(self.index(bass)), {1, 2})
+        self.assertNotIn(self.index(drums), picked)
+        # Left-click a stem the box missed: it joins, and the box stays.
+        self.click_block(self.index(drums), 0)
+        self.assertEqual(view.picks().get(self.index(drums)), {0})
+        for index, bars in picked.items():
+            self.assertTrue(bars <= view.picks()[index])
+        self.click_block(self.index(drums), 3)
+        self.assertEqual(view.picks().get(self.index(drums)), {0, 3})
+        self.assertEqual(view.picks().get(self.index(bass)), {1, 2})
+
+    def test_shift_drag_adds_blocks_and_keeps_the_other_stems(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        view.set_picks({self.index(drums): {0}, self.index(bass): {1, 2}})
+        first = view._clip_for(self.index(drums)).sceneBoundingRect()
+        last = view._clip_for(self.index(vocals)).sceneBoundingRect()
+        pps = view.pixels_per_second
+        rows = [view._clip_for(i).sceneBoundingRect() for i in range(len(self.window.project.tracks))]
+        bottom = max(r.bottom() for r in rows) + 20
+        x0 = first.left() + 4.3 * pps
+        x1 = first.left() + 7.5 * pps
+        start = view.mapFromScene(x0, bottom)
+        end = view.mapFromScene(x1, last.center().y())
+        shift = Qt.KeyboardModifier.ShiftModifier
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, shift, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, shift, end)
+        self.app.processEvents()
+        picks = view.picks()
+        self.assertEqual(picks.get(self.index(drums)), {0})
+        self.assertEqual(picks.get(self.index(bass)), {1, 2})
+        self.assertEqual(picks.get(self.index(vocals)), {2, 3})
+
+    def test_a_plain_drag_adds_another_stem_and_keeps_the_rest(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        view.set_picks({self.index(drums): {0}, self.index(bass): {1, 2}})
+        for track in (drums, bass):
+            view._clip_for(self.index(track)).setSelected(True)
+        self.app.processEvents()
+        selected = view.selected_indices()
+        first = view._clip_for(self.index(drums)).sceneBoundingRect()
+        last = view._clip_for(self.index(vocals)).sceneBoundingRect()
+        pps = view.pixels_per_second
+        rows = [view._clip_for(i).sceneBoundingRect() for i in range(len(self.window.project.tracks))]
+        bottom = max(r.bottom() for r in rows) + 20
+        x0 = first.left() + 4.3 * pps
+        x1 = first.left() + 7.5 * pps
+        start = view.mapFromScene(x0, bottom)
+        end = view.mapFromScene(x1, last.center().y())
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        self.app.processEvents()
+        picks = view.picks()
+        self.assertEqual(picks.get(self.index(drums)), {0})
+        self.assertEqual(picks.get(self.index(bass)), {1, 2})
+        self.assertEqual(picks.get(self.index(vocals)), {2, 3})
+        self.assertEqual(view.selected_indices(), selected)
+        # A click on empty space still clears. The drag does not.
+        QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        self.app.processEvents()
+        self.assertEqual(view.picks(), {})
+        self.assertEqual(view.selected_indices(), [])
+
+    def test_a_drag_keeps_a_stem_that_was_selected_on_its_own(self):
+        drums, _bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        self.click(self.index(drums))
+        self.assertEqual(view.selected_indices(), [self.index(drums)])
+        clicked = set(view.picks().get(self.index(drums), ()))
+        self.assertTrue(clicked)  # the click itself picked that stem's bar
+        header = self.window._selected
+        first = view._clip_for(self.index(drums)).sceneBoundingRect()
+        last = view._clip_for(self.index(vocals)).sceneBoundingRect()
+        pps = view.pixels_per_second
+        rows = [view._clip_for(i).sceneBoundingRect() for i in range(len(self.window.project.tracks))]
+        bottom = max(r.bottom() for r in rows) + 20
+        x0 = first.left() + 4.3 * pps
+        x1 = first.left() + 7.5 * pps
+        start = view.mapFromScene(x0, bottom)
+        end = view.mapFromScene(x1, last.center().y())
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        self.app.processEvents()
+        self.assertTrue(clicked <= set(view.picks().get(self.index(drums), ())))
+        self.assertEqual(view.picks().get(self.index(vocals)), {2, 3})
+        self.assertEqual(view.selected_indices(), [self.index(drums)])
+        self.assertEqual(self.window._selected, header)
+
+    def _drag_box(self, view, start, end):
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(view.viewport(), end)
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        self.app.processEvents()
+
+    def _vocals_only_box(self, view, vocals):
+        """A drag box over vocals, starting in the empty row under it."""
+        clip = view._clip_for(self.index(vocals))
+        rect = clip.sceneBoundingRect()
+        pps = view.pixels_per_second
+        start = view.mapFromScene(rect.left() + 4.3 * pps, rect.bottom() + 16)
+        end = view.mapFromScene(rect.left() + 7.5 * pps, rect.center().y())
+        return start, end
+
+    def test_plain_clicks_stay_when_a_drag_box_adds_another_stem(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        self.click(self.index(drums))
+        self.click(self.index(bass))
+        drums_bars = set(view.picks()[self.index(drums)])
+        bass_bars = set(view.picks()[self.index(bass)])
+        self.assertEqual(view.selected_indices(), sorted((self.index(drums), self.index(bass))))
+        header = self.window._selected
+        start, end = self._vocals_only_box(view, vocals)
+        self._drag_box(view, start, end)
+        picks = view.picks()
+        self.assertTrue(drums_bars <= set(picks.get(self.index(drums), ())))
+        self.assertTrue(bass_bars <= set(picks.get(self.index(bass), ())))
+        self.assertEqual(picks.get(self.index(vocals)), {2, 3})
+        self.assertEqual(view.selected_indices(), sorted((self.index(drums), self.index(bass))))
+        self.assertEqual(self.window._selected, header)
+
+    def test_a_drag_box_keeps_stems_already_playing(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        self.press(self.index(drums), 0)
+        self.press(self.index(bass), 0)
+        self.assertEqual(view.picks(), {})
+        self.assertEqual(view.selected_indices(), [])
+        start, end = self._vocals_only_box(view, vocals)
+        self._drag_box(view, start, end)
+        picks = view.picks()
+        self.assertIn(0, picks.get(self.index(drums), ()))
+        self.assertIn(0, picks.get(self.index(bass), ()))
+        self.assertEqual(picks.get(self.index(vocals)), {2, 3})
+        self.assertEqual(
+            view.selected_indices(), sorted((self.index(drums), self.index(bass)))
+        )
+
+    def test_right_click_unselects_a_split_stem(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.horizontalScrollBar().setValue(0)
+        view.verticalScrollBar().setValue(0)
+        self.app.processEvents()
+        wanted = {
+            self.index(drums): {0, 1},
+            self.index(bass): {1},
+            self.index(vocals): {2},
+        }
+        view.set_picks(wanted)
+        view._clip_for(self.index(drums)).setSelected(True)
+        view._clip_for(self.index(bass)).setSelected(True)
+        self.app.processEvents()
+        clip = view._clip_for(self.index(drums))
+        point = view.mapFromScene(clip.sceneBoundingRect().center())
+        QTest.mouseClick(view.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, point)
+        self.app.processEvents()
+        picks = view.picks()
+        self.assertNotIn(self.index(drums), picks)
+        self.assertEqual(picks.get(self.index(bass)), {1})
+        self.assertEqual(picks.get(self.index(vocals)), {2})
+        self.assertNotIn(self.index(drums), view.selected_indices())
+        self.assertIn(self.index(bass), view.selected_indices())
+
+    def test_a_bar_beside_a_playing_stem_joins_in_step(self):
+        drums, bass, _other, _vocals = self.split("Song")
+        self.press(self.index(drums), 0)
+        self.press(self.index(bass), 0)
+        self.mix(20)
+        group = stem_group(drums)
+        cursor = self.engine._groups[group].cursor
+        self.assertGreater(cursor, 0)
+        self.assertEqual(self.engine._groups[group].loop, (0, 2 * OUTPUT_RATE))
+        # The next bar of the stem beside the one already playing.
+        self.press(self.index(bass), 1)
+        self.assertGreaterEqual(self.engine._groups[group].cursor, cursor)
+        self.assertEqual(self.engine._groups[group].loop, (0, 2 * OUTPUT_RATE))
+        bass_now = (self.index(bass), stem_block(0))
+        bass_next = (self.index(bass), stem_block(1))
+        drums_key = (self.index(drums), stem_block(0))
+        self.assertEqual(self.engine._voices[bass_next].shift, 2 * OUTPUT_RATE)
+        self.assertEqual(self.engine._voices[bass_next].length, 2 * OUTPUT_RATE)
+        self.assertEqual(self.engine._voices[bass_now].length, 2 * OUTPUT_RATE)
+        playing = {key for key, state in self.engine.previews().items() if state[0]}
+        self.assertEqual(playing, {drums_key, bass_now, bass_next})
+        # Drums stays on its bar; bass's new bar is its own bar, not drums' bar again.
+        mixed = self.mix(8)
+        at = 2 * BLOCK
+        frame = cursor + at
+        own = frame % (2 * OUTPUT_RATE)
+        expect = (own * STEP) + ((own + 2 * OUTPUT_RATE) * 2 * STEP) + (own * 2 * STEP)
+        # bass bar 0 loops the first bar (scale 2) and bar 1 plays the next bar (scale 2).
+        self.assertLess(abs(float(mixed[at]) - expect), 0.002)
+
+    def test_a_longer_stem_plays_out_when_a_shorter_one_is_already_going(self):
+        drums, bass, _other, _vocals = self.split("Song")
+        self.press(self.index(drums), 0)
+        # Reach the end of the short bar, then start a longer run beside it.
+        self.mix((2 * OUTPUT_RATE - 4 * BLOCK) // BLOCK)
+        group = stem_group(drums)
+        cursor = self.engine._groups[group].cursor
+        self.assertLess(cursor, 2 * OUTPUT_RATE)
+        self.window._start_blocks([(self.index(bass), 0), (self.index(bass), 1)])
+        self.assertGreaterEqual(self.engine._groups[group].cursor, cursor)
+        self.assertEqual(self.engine._groups[group].loop, (0, 4 * OUTPUT_RATE))
+        drums_key = (self.index(drums), stem_block(0))
+        bass_key = (self.index(bass), stem_block(0))
+        self.assertEqual(self.engine._voices[drums_key].length, 2 * OUTPUT_RATE)
+        self.assertEqual(self.engine._voices[bass_key].length, 4 * OUTPUT_RATE)
+        mixed = self.mix(16)
+        at = 6 * BLOCK  # past the short bar's end, still inside the long run
+        frame = cursor + at
+        self.assertGreater(frame, 2 * OUTPUT_RATE)
+        self.assertLess(frame, 4 * OUTPUT_RATE)
+        expect = (frame % (2 * OUTPUT_RATE)) * STEP + frame * 2 * STEP
+        self.assertLess(abs(float(mixed[at]) - expect), 0.002)
+
+    def test_a_play_click_keeps_the_other_selected_stems(self):
+        drums, bass, _other, vocals = self.split("Song")
+        view = self.window._view_for(self.index(drums))
+        view.scene_obj.clearSelection()
+        self.app.processEvents()
+        wanted = {self.index(drums): {0, 1}, self.index(bass): {1}, self.index(vocals): {3}}
+        view.set_picks(wanted)
+        view.track_selected.emit(self.index(drums))
+        self.app.processEvents()
+        header = self.window._selected
+        self.click(self.index(bass), 1)
+        self.assertEqual(view.picks(), wanted)
+        self.assertEqual(view.selected_indices(), [])
+        self.assertEqual(self.window._selected, header)
+        playing = {key[0] for key, state in self.engine.previews().items() if state[0]}
+        self.assertTrue({self.index(drums), self.index(bass), self.index(vocals)} <= playing)
+        # Whole clips stay selected too: ▶ does not leave only the clicked stem.
+        self.engine.preview_stop_all()
+        for track in (drums, bass, vocals):
+            view._clip_for(self.index(track)).setSelected(True)
+        self.app.processEvents()
+        selected = view.selected_indices()
+        header = self.window._selected
+        self.click(self.index(bass), 1)
+        self.assertEqual(view.picks(), wanted)
+        self.assertEqual(view.selected_indices(), selected)
+        self.assertEqual(self.window._selected, header)
 
 
 if __name__ == "__main__":

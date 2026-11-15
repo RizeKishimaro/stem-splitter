@@ -891,6 +891,10 @@ class MainWindow(QMainWindow):
                 )
             )
             timeline.stem_loop_dragged.connect(self._drag_stem_loop)
+            timeline.stem_unselect_requested.connect(
+                lambda index, view=timeline: self._on_stem_unselect(view, index)
+            )
+            timeline.stem_half_split_requested.connect(self._split_stem_in_half)
             timeline.row_move_requested.connect(
                 lambda index, row, view=timeline: self._move_track_to_row(index, view, row)
             )
@@ -2676,17 +2680,61 @@ class MainWindow(QMainWindow):
             self._toggle_second_canvas(True)
         self._move_track_to_canvas(index, target)
 
+    def _on_stem_unselect(self, view, index: int) -> None:
+        clip = view._clip_for(index)
+        view._unselect_handled = False
+        if clip is None or not self._right_click_unselects(view, clip):
+            return
+        view._unselect_handled = True
+        self._drop_stem_from_selection(view, clip)
+
+    def _right_click_unselects(self, view, clip) -> bool:
+        """A right-click drops a split stem that is selected, and one of
+        several selected tracks. A track that is not selected keeps its menu."""
+        index = clip.clip_index
+        tracks = self.project.tracks
+        picked = index in view.picks()
+        if not clip.isSelected() and not picked:
+            return False
+        if 0 <= index < len(tracks) and stem_group(tracks[index]):
+            return True
+        selected = [item for other in self._timelines() for item in other.selected_indices()]
+        return clip.isSelected() and len(selected) > 1
+
+    def _drop_stem_from_selection(self, view, clip) -> None:
+        index = clip.clip_index
+        picks = view.picks()
+        if index in picks:
+            del picks[index]
+            view.set_picks(picks)
+        was_selected = clip.isSelected()
+        if was_selected:
+            clip.setSelected(False)
+        tracks = self.project.tracks
+        name = tracks[index].get("name", "Track") if 0 <= index < len(tracks) else "Track"
+        self.statusBar().showMessage(f"“{name}” is no longer selected", 3000)
+        if was_selected and self._selected != index:
+            return
+        if self._selected == index:
+            rest = [item for other in self._timelines() for item in other.selected_indices()]
+            if not rest:
+                for other in self._timelines():
+                    if other.picks():
+                        rest = [min(other.picks())]
+                        break
+            self._on_track_selected(rest[0] if rest else -1)
+
     def _clip_context_menu(self, pos, view=None):
         view = view or self.timeline
+        if getattr(view, "_skip_context_menu", False):
+            view._skip_context_menu = False
+            return
         bar = view.bar_under(pos)
         clip = view.clip_at(pos)
-        selected = [index for other in self._timelines() for index in other.selected_indices()]
-        if clip is not None and clip.isSelected() and len(selected) > 1:
-            # Right-click on one of several selected tracks takes it out of
-            # the selection (Shift+click adds it back); no menu.
-            clip.setSelected(False)
-            name = self.project.tracks[clip.clip_index].get("name", "Track") if clip.clip_index < len(self.project.tracks) else "Track"
-            self.statusBar().showMessage(f"“{name}” is no longer selected", 3000)
+        if clip is not None and self._right_click_unselects(view, clip):
+            # Right-click takes this stem out. A split stem is selected by
+            # its bars as well as its outline; both go, and the others stay.
+            self._drop_stem_from_selection(view, clip)
             return
         menu = QMenu(self)
         block = view.block_at(pos)
@@ -3263,6 +3311,75 @@ class MainWindow(QMainWindow):
         self._commit_edit()
         self._refresh_timeline()
         self._select_track(index)
+
+    def _split_stem_in_half(self, index: int, local_start: float = 0.0, local_duration: float = -1.0) -> None:
+        """Cut the block under the scissor in half, on the same row, in place.
+
+        The two halves stay where that block was. The rest of the stem stays
+        on that row too, and still plays one bar at a time.
+        """
+        tracks = self.project.tracks
+        index = int(index)
+        if not (0 <= index < len(tracks)):
+            return
+        track = tracks[index]
+        start = float(track.get("start", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        duration = float(track.get("duration", 0.0) or 0.0)
+        if float(local_duration) < 0:
+            local_start, local_duration = 0.0, duration
+        region_start = max(0.0, min(duration, float(local_start)))
+        region_end = max(region_start, min(duration, region_start + float(local_duration)))
+        if region_end - region_start <= 0.12:
+            self.statusBar().showMessage("This stem is too short to split in half", 3000)
+            return
+        mid = (region_start + region_end) / 2.0
+        if mid - region_start <= 0.05 or region_end - mid <= 0.05:
+            self.statusBar().showMessage("This stem is too short to split in half", 3000)
+            return
+        self._remember_edit()
+        name = track.get("name", "Track")
+
+        def half(local_a: float, local_b: float) -> dict:
+            piece = dict(track)
+            piece["start"] = start + local_a
+            piece["offset"] = offset + local_a
+            piece["duration"] = local_b - local_a
+            piece["armed"] = False
+            piece["bar_block"] = True
+            piece["name"] = name
+            piece["lane"] = lane
+            return piece
+
+        lane = track.get("lane")
+        if lane is None:
+            lane = self._lane_ids
+            self._lane_ids += 1
+        left = half(region_start, mid)
+        right = half(mid, region_end)
+        segments = []
+        if region_start >= 0.05:
+            segments.append((0.0, region_start))
+        if duration - region_end >= 0.05:
+            segments.append((region_end, duration - region_end))
+        remainders = []
+        for number, (local_a, length) in enumerate(segments):
+            part = track if number == 0 else dict(track)
+            part["start"] = start + local_a
+            part["offset"] = offset + local_a
+            part["duration"] = length
+            part.pop("bar_block", None)
+            if lane is not None:
+                part["lane"] = lane
+            if number:
+                part["armed"] = False
+            remainders.append(part)
+        tracks[index:index + 1] = remainders + [left, right]
+        self._reload_engine()
+        self._commit_edit()
+        self._refresh_timeline()
+        self._select_track(next(i for i, other in enumerate(self.project.tracks) if other is left))
+        self.statusBar().showMessage(f"Split “{name}” into two tracks", 2000)
 
     def _duplicate_selected(self) -> None:
         indices = self._selection()
@@ -3935,6 +4052,63 @@ class MainWindow(QMainWindow):
             return
         self._start_blocks([(track, bar)])
 
+    def _is_split_piece(self, index: int) -> bool:
+        """True when this clip is one piece of a stem that was cut in two.
+
+        An uncut stem is the whole file and still plays one bar at a time.
+        A piece covers only part of the file and has a sibling from the
+        same split, so its ▶ plays the piece straight through.
+        """
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return False
+        track = tracks[index]
+        group = stem_group(track)
+        path = track.get("path")
+        if not group or not path or stem_loop(track) is not None:
+            return False
+        audio = track.get("_audio")
+        if audio is None or len(audio) == 0:
+            return False
+        file_length = len(audio) / OUTPUT_RATE
+        offset = float(track.get("offset", 0.0) or 0.0)
+        duration = float(track.get("duration", 0.0) or 0.0)
+        if offset <= 0.05 and duration >= file_length - 0.05:
+            return False
+        # A bar grabbed and moved is one block. The stem it was taken from
+        # still plays one bar at a time; only a cut at the playhead plays
+        # the whole piece.
+        if track.get("bar_block"):
+            return False
+        siblings = [
+            other for other in tracks
+            if other is not track and stem_group(other) == group and other.get("path") == path
+        ]
+        if not siblings or any(other.get("bar_block") for other in siblings):
+            return False
+        return True
+
+    def _whole_pieces(self, keys) -> list[tuple[int, int]]:
+        """A cut stem plays every bar of the piece under the pointer.
+
+        One bar of that piece is half of it when the cut left two bars, and
+        looping that bar restarts in the middle. The piece is one run.
+        """
+        found = []
+        seen = set()
+        for track, bar in keys:
+            bars = [int(bar)]
+            if self._is_split_piece(track):
+                view = self._view_for(track)
+                clip = view._clip_for(track)
+                if clip is not None:
+                    bars = [int(span[0]) for span in view._spans_of(clip)] or bars
+            for other in bars:
+                if (track, other) not in seen:
+                    seen.add((track, other))
+                    found.append((track, other))
+        return found
+
     def _block_runs(self, keys) -> list[tuple[int, int, int]]:
         """``(track, first bar, last bar)`` for ``keys``: a stem's bars side
         by side become one run; every other block stands alone."""
@@ -3984,7 +4158,16 @@ class MainWindow(QMainWindow):
         chains = []  # [place, arrangement end, song start, song end, units]
         for start, end, song, song_end, place, unit in found:
             for chain in chains:
-                if chain[0] == place and abs(chain[1] - start) < 1e-3 and abs(chain[3] - song) < 1e-3:
+                # Bars of one clip are not pieces of a cut. The bar beside a
+                # playing bar joins that stem in step; it does not restart
+                # the other stems or play the same bar twice.
+                same_clip = any(item[0] == unit[0] for item in chain[4])
+                if (
+                    not same_clip
+                    and chain[0] == place
+                    and abs(chain[1] - start) < 1e-3
+                    and abs(chain[3] - song) < 1e-3
+                ):
                     chain[1], chain[3] = end, song_end
                     chain[4].append(unit)
                     break
@@ -3993,9 +4176,9 @@ class MainWindow(QMainWindow):
         return {unit: (number, chain[2], chain[3]) for number, chain in enumerate(chains) for unit in chain[4]}
 
     def _with_neighbours(self, units) -> list:
-        """A block pressed beside one of its chain that is already playing:
-        that split's playing blocks stop and start again with it, so the
-        chain plays as one from its start."""
+        """A block pressed beside a piece of the same cut stem that is
+        already playing: those pieces stop and start again as one chain.
+        Stems that are not part of that chain keep playing."""
         existing = {
             (key[0], run[0]): (key, (key[0], run[0], run[1]))
             for key, (_data, run) in self._preview_tracks.items()
@@ -4006,19 +4189,18 @@ class MainWindow(QMainWindow):
         if not extra:
             return units
         chains = self._stem_chains(units + extra)
-        tracks = self.project.tracks
         restart = set()
         for unit_key in asked:
             if unit_key not in chains:
                 continue
             number = chains[unit_key][0]
             if any(chains.get(other[:2], (None,))[0] == number for other in extra):
-                restart.add(stem_group(tracks[unit_key[0]]))
+                restart.add(number)
         if not restart:
             return units
         units = list(units)
         for unit_key, (key, unit) in existing.items():
-            if unit_key in asked or stem_group(tracks[key[0]]) not in restart:
+            if unit_key in asked or chains.get(unit_key, (None,))[0] not in restart:
                 continue
             self.engine.preview_stop(key)
             del self._preview_tracks[key]
@@ -4031,7 +4213,7 @@ class MainWindow(QMainWindow):
         blocks = []
         groups: dict[str, list] = {}  # group -> [start, members, loop, end] (song seconds)
         spans: dict[tuple, tuple] = {}  # stem voice key -> (start, end) of its chain
-        units = self._with_neighbours(self._block_runs(keys))
+        units = self._with_neighbours(self._block_runs(self._whole_pieces(keys)))
         chains = self._stem_chains(units)
         for track, bar, last in units:
             view = self._view_for(track)
@@ -4077,6 +4259,15 @@ class MainWindow(QMainWindow):
             members = entry[1]
             if group in joining:
                 ref = self.engine.group_loop(group)
+                # A longer stem joins a clock a shorter one already started.
+                # Grow the loop so the long stem plays to its end. The clock
+                # stays where it is, and the short stem keeps its own bar.
+                if ref is not None:
+                    current = ref[1] - ref[0]
+                    needed = max(spans[key][1] - spans[key][0] for key in members)
+                    if needed > current + 1e-4:
+                        ref = (ref[0], ref[0] + needed)
+                        entry[2] = ref
             else:
                 # The earliest block sets the clock; the loop is as long
                 # as the longest block.
