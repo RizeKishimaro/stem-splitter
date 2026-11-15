@@ -1,0 +1,282 @@
+{
+  "format": "soniclab.sprite-map",
+  "version": 1,
+  "character": "green_dancer",
+  "source": "sprites.png",
+  "animations": {
+    "body": {
+      "frames": [
+        "frame_000",
+        "frame_072",
+        "frame_074",
+        "frame_020",
+        "frame_064",
+        "frame_066",
+        "frame_068",
+        "frame_071"
+      ],
+      "confirmed": false,
+      "trigger": "",
+      "base": true,
+      "holds": 12,
+      "category": "idle",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": "one pose per beat",
+      "note": "The dance. Standing, a front view, then the turn on the second bar. Each pose is held for one beat. Drum hits do not change this speed."
+    },
+    "kick": {
+      "frames": [
+        "frame_056",
+        "frame_057",
+        "frame_062"
+      ],
+      "confirmed": false,
+      "trigger": "kick",
+      "category": "kick",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": null,
+      "note": "Leg raises. A kick shows these frames and does not advance the dance."
+    },
+    "snare": {
+      "frames": [
+        "frame_018",
+        "frame_060",
+        "frame_024"
+      ],
+      "confirmed": false,
+      "trigger": "snare",
+      "category": "arms",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": null,
+      "note": "Raised arm, then hands together, then arms in front."
+    },
+    "hat": {
+      "frames": [
+        "frame_009",
+        "frame_040",
+        "frame_041"
+      ],
+      "confirmed": false,
+      "trigger": "hat",
+      "category": "arms",
+      "confidence": "medium",
+      "sheet_order": false,
+      "timing": null,
+      "note": "Small wing and arm accents."
+    },
+    "bass": {
+      "frames": [
+        "frame_032",
+        "frame_034",
+        "frame_036",
+        "frame_038"
+      ],
+      "confirmed": false,
+      "trigger": "bass",
+      "category": "lean",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": "one lean per beat while the bass holds",
+      "note": "Body leans. A held bass steps through them once per beat."
+    },
+    "perc": {
+      "frames": [
+        "frame_048",
+        "frame_050",
+        "frame_052",
+        "frame_055"
+      ],
+      "confirmed": false,
+      "trigger": "perc",
+      "category": "spin",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": null,
+      "note": "Moments from the roll. The whole roll is the tumble clip."
+    },
+    "downbeat": {
+      "frames": [
+        "frame_000",
+        "frame_064"
+      ],
+      "confirmed": false,
+      "trigger": "downbeat",
+      "category": "turn",
+      "confidence": "high",
+      "sheet_order": false,
+      "timing": null,
+      "note": "The standing pose and the start of the turn. The dance already lands on these."
+    },
+    "tumble": {
+      "frames": [
+        "frame_048",
+        "frame_049",
+        "frame_050",
+        "frame_051",
+        "frame_052",
+        "frame_053",
+        "frame_054",
+        "frame_055"
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "confirmed": false,
+      "sheet_order": true,
+      "timing": null,
+      "trigger": "",
+      "note": "Frames 48\u201355 are one roll in sheet order. The sheet has no frame duration, so this is not a timed animation."
+    },
+    "turn": {
+      "frames": [
+        "frame_064",
+        "frame_065",
+        "frame_066",
+        "frame_067",
+        "frame_068",
+        "frame_069",
+        "frame_070",
+        "frame_071"
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "confirmed": false,
+      "sheet_order": true,
+      "timing": null,
+      "trigger": "",
+      "note": "Frames 64\u201371 turn from a three-quarter view through the side and the back, then return toward the front. Timing is not in the image."
+    }
+  },
+  "groups": {
+    "standing": {
+      "frames": [
+        "frame_000",
+        "frame_001",
+        "frame_002",
+        "frame_003",
+        "frame_004",
+        "frame_005",
+        "frame_006",
+        "frame_007"
+      ],
+      "category": "idle",
+      "sequence": false,
+      "confidence": "high",
+      "note": "Same standing family. Frames 4, 5 and 6 are nearly the same picture. Not one animation."
+    },
+    "wings": {
+      "frames": [
+        "frame_008",
+        "frame_009",
+        "frame_010",
+        "frame_011",
+        "frame_012",
+        "frame_013",
+        "frame_014",
+        "frame_015"
+      ],
+      "category": "arms",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Wing or coat changes. Not exported as an animation."
+    },
+    "mixed_row_2": {
+      "frames": [
+        "frame_016",
+        "frame_017",
+        "frame_018",
+        "frame_019",
+        "frame_020",
+        "frame_021",
+        "frame_022",
+        "frame_023"
+      ],
+      "category": "unknown",
+      "sequence": false,
+      "confidence": "low",
+      "note": "Standing frames mixed with a raised arm and two unnamed poses. Not one movement."
+    },
+    "arms_front": {
+      "frames": [
+        "frame_024",
+        "frame_025",
+        "frame_026",
+        "frame_027",
+        "frame_028",
+        "frame_029",
+        "frame_030",
+        "frame_031"
+      ],
+      "category": "arms",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Arms held in front. A pose family, not a confirmed clip."
+    },
+    "leans": {
+      "frames": [
+        "frame_032",
+        "frame_033",
+        "frame_034",
+        "frame_035",
+        "frame_036",
+        "frame_037",
+        "frame_038",
+        "frame_039"
+      ],
+      "category": "lean",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Lean family in sheet order. It may be a pose set rather than one move, so it is not an animation."
+    },
+    "arms_row": {
+      "frames": [
+        "frame_040",
+        "frame_041",
+        "frame_042",
+        "frame_043",
+        "frame_044",
+        "frame_045",
+        "frame_046",
+        "frame_047"
+      ],
+      "category": "arms",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not a confirmed clip."
+    },
+    "kick_row": {
+      "frames": [
+        "frame_056",
+        "frame_057",
+        "frame_058",
+        "frame_059",
+        "frame_060",
+        "frame_061",
+        "frame_062",
+        "frame_063"
+      ],
+      "category": "kick",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Kicks are mixed with arm poses, so the row is not one animation."
+    },
+    "front_standing": {
+      "frames": [
+        "frame_072",
+        "frame_073",
+        "frame_074",
+        "frame_075",
+        "frame_076",
+        "frame_077",
+        "frame_078",
+        "frame_079"
+      ],
+      "category": "idle",
+      "sequence": false,
+      "confidence": "medium",
+      "note": "Front standing views. Neighbor frames differ. Not one animation."
+    }
+  }
+}

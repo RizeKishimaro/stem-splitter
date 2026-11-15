@@ -1,0 +1,1625 @@
+{
+  "format": "soniclab.sprite-map",
+  "version": 1,
+  "character": "green_dancer",
+  "source": "sprites.png",
+  "image": {
+    "width": 880,
+    "height": 1280
+  },
+  "grid": {
+    "columns": 8,
+    "rows": 10,
+    "cell_width": 110,
+    "cell_height": 128,
+    "spacing_x": 0,
+    "spacing_y": 0,
+    "margin_x": 0,
+    "margin_y": 0,
+    "confidence": "high",
+    "note": "880 and 1280 divide evenly by 110 and 128. Eighty sprites, one per cell, and none cross a cell edge."
+  },
+  "frames": {
+    "frame_000": {
+      "rect": [
+        0,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        30,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "high",
+      "column": 0,
+      "row": 0,
+      "sheet_index": 0,
+      "note": "Standing. Used as the rest pose."
+    },
+    "frame_001": {
+      "rect": [
+        110,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        140,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 1,
+      "row": 0,
+      "sheet_index": 1,
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named."
+    },
+    "frame_002": {
+      "rect": [
+        220,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        249,
+        22,
+        51,
+        104
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 2,
+      "row": 0,
+      "sheet_index": 2,
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named."
+    },
+    "frame_003": {
+      "rect": [
+        330,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        361,
+        24,
+        48,
+        102
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 3,
+      "row": 0,
+      "sheet_index": 3,
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named."
+    },
+    "frame_004": {
+      "rect": [
+        440,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "high",
+      "column": 4,
+      "row": 0,
+      "sheet_index": 4,
+      "note": "Standing. These three differ only by faint edge pixels."
+    },
+    "frame_005": {
+      "rect": [
+        550,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "high",
+      "column": 5,
+      "row": 0,
+      "sheet_index": 5,
+      "note": "Standing. These three differ only by faint edge pixels."
+    },
+    "frame_006": {
+      "rect": [
+        660,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        690,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "high",
+      "column": 6,
+      "row": 0,
+      "sheet_index": 6,
+      "note": "Standing. These three differ only by faint edge pixels."
+    },
+    "frame_007": {
+      "rect": [
+        770,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        22,
+        50,
+        104
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 7,
+      "row": 0,
+      "sheet_index": 7,
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named."
+    },
+    "frame_008": {
+      "rect": [
+        0,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        30,
+        151,
+        50,
+        103
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 0,
+      "row": 1,
+      "sheet_index": 8,
+      "note": "Close to the standing frames. A small wing change is possible and not named."
+    },
+    "frame_009": {
+      "rect": [
+        110,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        140,
+        152,
+        50,
+        102
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 1,
+      "row": 1,
+      "sheet_index": 9,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_010": {
+      "rect": [
+        220,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        251,
+        150,
+        47,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 2,
+      "row": 1,
+      "sheet_index": 10,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_011": {
+      "rect": [
+        330,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        149,
+        49,
+        104
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 3,
+      "row": 1,
+      "sheet_index": 11,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_012": {
+      "rect": [
+        440,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        460,
+        149,
+        51,
+        104
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 4,
+      "row": 1,
+      "sheet_index": 12,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_013": {
+      "rect": [
+        550,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        570,
+        149,
+        50,
+        105
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 5,
+      "row": 1,
+      "sheet_index": 13,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_014": {
+      "rect": [
+        660,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        682,
+        149,
+        47,
+        104
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 6,
+      "row": 1,
+      "sheet_index": 14,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_015": {
+      "rect": [
+        770,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        791,
+        150,
+        49,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 7,
+      "row": 1,
+      "sheet_index": 15,
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip."
+    },
+    "frame_016": {
+      "rect": [
+        0,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        27,
+        287,
+        55,
+        95
+      ],
+      "category": "unknown",
+      "confidence": "low",
+      "column": 0,
+      "row": 2,
+      "sheet_index": 16,
+      "note": "The drawing starts lower in the cell than frame 0 and still reaches the bottom. Pose not named."
+    },
+    "frame_017": {
+      "rect": [
+        110,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        144,
+        270,
+        41,
+        95
+      ],
+      "category": "unknown",
+      "confidence": "medium",
+      "column": 1,
+      "row": 2,
+      "sheet_index": 17,
+      "note": "The drawing sits higher in the cell than the standing frames and does not reach their foot line. The move is not named."
+    },
+    "frame_018": {
+      "rect": [
+        220,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        244,
+        259,
+        55,
+        93
+      ],
+      "category": "arms",
+      "confidence": "high",
+      "column": 2,
+      "row": 2,
+      "sheet_index": 18,
+      "note": "One arm is raised. The body is high in the cell."
+    },
+    "frame_019": {
+      "rect": [
+        330,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        353,
+        263,
+        63,
+        101
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 3,
+      "row": 2,
+      "sheet_index": 19,
+      "note": "An arm is extended and the head is tilted. The body is high in the cell."
+    },
+    "frame_020": {
+      "rect": [
+        440,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        279,
+        50,
+        103
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 4,
+      "row": 2,
+      "sheet_index": 20,
+      "note": "Standing, close to frame 0."
+    },
+    "frame_021": {
+      "rect": [
+        550,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        577,
+        287,
+        55,
+        95
+      ],
+      "category": "unknown",
+      "confidence": "low",
+      "column": 5,
+      "row": 2,
+      "sheet_index": 21,
+      "note": "The drawing starts lower in the cell than frame 0 and still reaches the bottom. Pose not named."
+    },
+    "frame_022": {
+      "rect": [
+        660,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        690,
+        279,
+        50,
+        103
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 6,
+      "row": 2,
+      "sheet_index": 22,
+      "note": "Standing, close to frame 0."
+    },
+    "frame_023": {
+      "rect": [
+        770,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        279,
+        50,
+        103
+      ],
+      "category": "unknown",
+      "confidence": "low",
+      "column": 7,
+      "row": 2,
+      "sheet_index": 23,
+      "note": "Differs from the standing frames. A face change is possible and not confirmed."
+    },
+    "frame_024": {
+      "rect": [
+        0,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        31,
+        408,
+        49,
+        102
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 0,
+      "row": 3,
+      "sheet_index": 24,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_025": {
+      "rect": [
+        110,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        129,
+        409,
+        59,
+        101
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 1,
+      "row": 3,
+      "sheet_index": 25,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_026": {
+      "rect": [
+        220,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        251,
+        408,
+        49,
+        102
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 2,
+      "row": 3,
+      "sheet_index": 26,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_027": {
+      "rect": [
+        330,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        408,
+        50,
+        102
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 3,
+      "row": 3,
+      "sheet_index": 27,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_028": {
+      "rect": [
+        440,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        469,
+        407,
+        49,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 4,
+      "row": 3,
+      "sheet_index": 28,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_029": {
+      "rect": [
+        550,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        582,
+        409,
+        58,
+        101
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 5,
+      "row": 3,
+      "sheet_index": 29,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_030": {
+      "rect": [
+        660,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        689,
+        407,
+        49,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 6,
+      "row": 3,
+      "sheet_index": 30,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_031": {
+      "rect": [
+        770,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        408,
+        50,
+        102
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 7,
+      "row": 3,
+      "sheet_index": 31,
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip."
+    },
+    "frame_032": {
+      "rect": [
+        0,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        6,
+        552,
+        76,
+        86
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 0,
+      "row": 4,
+      "sheet_index": 32,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_033": {
+      "rect": [
+        110,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        123,
+        546,
+        70,
+        91
+      ],
+      "category": "lean",
+      "confidence": "medium",
+      "column": 1,
+      "row": 4,
+      "sheet_index": 33,
+      "note": "A lean, with a leg forward. A kick is not confirmed."
+    },
+    "frame_034": {
+      "rect": [
+        220,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        248,
+        533,
+        53,
+        104
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 2,
+      "row": 4,
+      "sheet_index": 34,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_035": {
+      "rect": [
+        330,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        356,
+        541,
+        70,
+        96
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 3,
+      "row": 4,
+      "sheet_index": 35,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_036": {
+      "rect": [
+        440,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        467,
+        551,
+        75,
+        87
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 4,
+      "row": 4,
+      "sheet_index": 36,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_037": {
+      "rect": [
+        550,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        576,
+        542,
+        70,
+        95
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 5,
+      "row": 4,
+      "sheet_index": 37,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_038": {
+      "rect": [
+        660,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        688,
+        533,
+        53,
+        104
+      ],
+      "category": "lean",
+      "confidence": "high",
+      "column": 6,
+      "row": 4,
+      "sheet_index": 38,
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge."
+    },
+    "frame_039": {
+      "rect": [
+        770,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        783,
+        544,
+        70,
+        93
+      ],
+      "category": "lean",
+      "confidence": "medium",
+      "column": 7,
+      "row": 4,
+      "sheet_index": 39,
+      "note": "A lean, with a leg forward. A kick is not confirmed."
+    },
+    "frame_040": {
+      "rect": [
+        0,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        20,
+        660,
+        57,
+        106
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 0,
+      "row": 5,
+      "sheet_index": 40,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_041": {
+      "rect": [
+        110,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        128,
+        660,
+        60,
+        106
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 1,
+      "row": 5,
+      "sheet_index": 41,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_042": {
+      "rect": [
+        220,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        240,
+        660,
+        57,
+        106
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 2,
+      "row": 5,
+      "sheet_index": 42,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_043": {
+      "rect": [
+        330,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        662,
+        50,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 3,
+      "row": 5,
+      "sheet_index": 43,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_044": {
+      "rect": [
+        440,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        471,
+        661,
+        57,
+        105
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 4,
+      "row": 5,
+      "sheet_index": 44,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_045": {
+      "rect": [
+        550,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        661,
+        61,
+        105
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 5,
+      "row": 5,
+      "sheet_index": 45,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_046": {
+      "rect": [
+        660,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        691,
+        660,
+        57,
+        106
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 6,
+      "row": 5,
+      "sheet_index": 46,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_047": {
+      "rect": [
+        770,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        662,
+        50,
+        103
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 7,
+      "row": 5,
+      "sheet_index": 47,
+      "note": "Arm and wing positions. Not confirmed as one clip."
+    },
+    "frame_048": {
+      "rect": [
+        0,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        22,
+        827,
+        78,
+        67
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 0,
+      "row": 6,
+      "sheet_index": 48,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_049": {
+      "rect": [
+        110,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        143,
+        835,
+        63,
+        59
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 1,
+      "row": 6,
+      "sheet_index": 49,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_050": {
+      "rect": [
+        220,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        243,
+        829,
+        64,
+        65
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 2,
+      "row": 6,
+      "sheet_index": 50,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_051": {
+      "rect": [
+        330,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        355,
+        809,
+        64,
+        84
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 3,
+      "row": 6,
+      "sheet_index": 51,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_052": {
+      "rect": [
+        440,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        465,
+        817,
+        62,
+        76
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 4,
+      "row": 6,
+      "sheet_index": 52,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_053": {
+      "rect": [
+        550,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        569,
+        816,
+        73,
+        78
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 5,
+      "row": 6,
+      "sheet_index": 53,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_054": {
+      "rect": [
+        660,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        678,
+        826,
+        83,
+        68
+      ],
+      "category": "spin",
+      "confidence": "high",
+      "column": 6,
+      "row": 6,
+      "sheet_index": 54,
+      "note": "Part of one roll, in sheet order."
+    },
+    "frame_055": {
+      "rect": [
+        770,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        789,
+        816,
+        72,
+        78
+      ],
+      "category": "spin",
+      "confidence": "medium",
+      "column": 7,
+      "row": 6,
+      "sheet_index": 55,
+      "note": "The roll is finishing and the body is more upright."
+    },
+    "frame_056": {
+      "rect": [
+        0,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        26,
+        923,
+        60,
+        99
+      ],
+      "category": "kick",
+      "confidence": "high",
+      "column": 0,
+      "row": 7,
+      "sheet_index": 56,
+      "note": "One leg is raised."
+    },
+    "frame_057": {
+      "rect": [
+        110,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        126,
+        928,
+        65,
+        94
+      ],
+      "category": "kick",
+      "confidence": "high",
+      "column": 1,
+      "row": 7,
+      "sheet_index": 57,
+      "note": "One leg is raised."
+    },
+    "frame_058": {
+      "rect": [
+        220,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        231,
+        925,
+        76,
+        97
+      ],
+      "category": "kick",
+      "confidence": "medium",
+      "column": 2,
+      "row": 7,
+      "sheet_index": 58,
+      "note": "A leg is lifted. The pose is less clear than 56 and 57."
+    },
+    "frame_059": {
+      "rect": [
+        330,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        344,
+        920,
+        67,
+        101
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 3,
+      "row": 7,
+      "sheet_index": 59,
+      "note": "Hands are near the waist. The supporting leg is down."
+    },
+    "frame_060": {
+      "rect": [
+        440,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        465,
+        916,
+        57,
+        106
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 4,
+      "row": 7,
+      "sheet_index": 60,
+      "note": "Hands are together in front. Not a confirmed kick."
+    },
+    "frame_061": {
+      "rect": [
+        550,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        577,
+        919,
+        57,
+        103
+      ],
+      "category": "kick",
+      "confidence": "medium",
+      "column": 5,
+      "row": 7,
+      "sheet_index": 61,
+      "note": "A leg is lifted. The pose is less clear than 56 and 57."
+    },
+    "frame_062": {
+      "rect": [
+        660,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        684,
+        923,
+        69,
+        99
+      ],
+      "category": "kick",
+      "confidence": "high",
+      "column": 6,
+      "row": 7,
+      "sheet_index": 62,
+      "note": "One leg is raised."
+    },
+    "frame_063": {
+      "rect": [
+        770,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        794,
+        922,
+        54,
+        100
+      ],
+      "category": "arms",
+      "confidence": "medium",
+      "column": 7,
+      "row": 7,
+      "sheet_index": 63,
+      "note": "A hand is near the head."
+    },
+    "frame_064": {
+      "rect": [
+        0,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        26,
+        1050,
+        58,
+        99
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 0,
+      "row": 8,
+      "sheet_index": 64,
+      "note": "Turn. Read as three-quarter, toward the viewer."
+    },
+    "frame_065": {
+      "rect": [
+        110,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        141,
+        1052,
+        49,
+        97
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 1,
+      "row": 8,
+      "sheet_index": 65,
+      "note": "Turn. Read as a side view."
+    },
+    "frame_066": {
+      "rect": [
+        220,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        248,
+        1053,
+        58,
+        96
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 2,
+      "row": 8,
+      "sheet_index": 66,
+      "note": "Turn. Read as a side view with the coat toward the camera."
+    },
+    "frame_067": {
+      "rect": [
+        330,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        361,
+        1053,
+        62,
+        96
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 3,
+      "row": 8,
+      "sheet_index": 67,
+      "note": "Turn. Read as the back."
+    },
+    "frame_068": {
+      "rect": [
+        440,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        1052,
+        58,
+        97
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 4,
+      "row": 8,
+      "sheet_index": 68,
+      "note": "Turn. Read as the back."
+    },
+    "frame_069": {
+      "rect": [
+        550,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        1050,
+        47,
+        99
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 5,
+      "row": 8,
+      "sheet_index": 69,
+      "note": "Turn. Read as a side view."
+    },
+    "frame_070": {
+      "rect": [
+        660,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        686,
+        1047,
+        58,
+        102
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 6,
+      "row": 8,
+      "sheet_index": 70,
+      "note": "Turn. Read as three-quarter."
+    },
+    "frame_071": {
+      "rect": [
+        770,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        793,
+        1048,
+        63,
+        102
+      ],
+      "category": "turn",
+      "confidence": "high",
+      "column": 7,
+      "row": 8,
+      "sheet_index": 71,
+      "note": "Turn. Read as the front."
+    },
+    "frame_072": {
+      "rect": [
+        0,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        37,
+        1165,
+        36,
+        111
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 0,
+      "row": 9,
+      "sheet_index": 72,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_073": {
+      "rect": [
+        110,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        147,
+        1165,
+        37,
+        110
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 1,
+      "row": 9,
+      "sheet_index": 73,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_074": {
+      "rect": [
+        220,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        255,
+        1165,
+        40,
+        107
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 2,
+      "row": 9,
+      "sheet_index": 74,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_075": {
+      "rect": [
+        330,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        364,
+        1165,
+        43,
+        105
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 3,
+      "row": 9,
+      "sheet_index": 75,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_076": {
+      "rect": [
+        440,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        473,
+        1165,
+        45,
+        104
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 4,
+      "row": 9,
+      "sheet_index": 76,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_077": {
+      "rect": [
+        550,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        584,
+        1165,
+        43,
+        105
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 5,
+      "row": 9,
+      "sheet_index": 77,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_078": {
+      "rect": [
+        660,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        695,
+        1165,
+        40,
+        107
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 6,
+      "row": 9,
+      "sheet_index": 78,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    },
+    "frame_079": {
+      "rect": [
+        770,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        807,
+        1165,
+        37,
+        110
+      ],
+      "category": "idle",
+      "confidence": "medium",
+      "column": 7,
+      "row": 9,
+      "sheet_index": 79,
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named."
+    }
+  },
+  "animations": {}
+}

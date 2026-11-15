@@ -10,6 +10,7 @@ A lightweight Python/PySide6 multitrack audio workstation foundation.
 - Play multiple clips in sync through one audio output stream.
 - Transport controls and a moving playhead.
 - Save/open a simple JSON project.
+- Sprite Animation Editor (View menu) for beat-reactive character sheets. See `docs/sprite_editor.md`.
 
 This is an early foundation, not a finished DAW. Clip trimming, effects, automation,
 advanced time-stretching and robust device selection are not implemented yet.

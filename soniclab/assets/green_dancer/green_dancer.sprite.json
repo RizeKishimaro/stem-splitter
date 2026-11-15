@@ -1,0 +1,2119 @@
+{
+  "format": "soniclab.sprite",
+  "version": 1,
+  "name": "green_dancer",
+  "bpm": 125.0,
+  "spritesheet": {
+    "file": "sprites.png",
+    "frame_width": 110,
+    "frame_height": 128,
+    "columns": 8,
+    "rows": 10,
+    "spacing_x": 0,
+    "spacing_y": 0,
+    "margin_x": 0,
+    "margin_y": 0,
+    "image_width": 880,
+    "image_height": 1280
+  },
+  "frames": [
+    {
+      "id": 0,
+      "name": "000",
+      "source": 0,
+      "category": "idle",
+      "confidence": "high",
+      "note": "Standing. Used as the rest pose.",
+      "rect": [
+        0,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        30,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 1,
+      "name": "001",
+      "source": 1,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named.",
+      "rect": [
+        110,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        140,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 2,
+      "name": "002",
+      "source": 2,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named.",
+      "rect": [
+        220,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        249,
+        22,
+        51,
+        104
+      ]
+    },
+    {
+      "id": 3,
+      "name": "003",
+      "source": 3,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named.",
+      "rect": [
+        330,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        361,
+        24,
+        48,
+        102
+      ]
+    },
+    {
+      "id": 4,
+      "name": "004",
+      "source": 4,
+      "category": "idle",
+      "confidence": "high",
+      "note": "Standing. These three differ only by faint edge pixels.",
+      "rect": [
+        440,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 5,
+      "name": "005",
+      "source": 5,
+      "category": "idle",
+      "confidence": "high",
+      "note": "Standing. These three differ only by faint edge pixels.",
+      "rect": [
+        550,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 6,
+      "name": "006",
+      "source": 6,
+      "category": "idle",
+      "confidence": "high",
+      "note": "Standing. These three differ only by faint edge pixels.",
+      "rect": [
+        660,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        690,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 7,
+      "name": "007",
+      "source": 7,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing. The pixels differ from frame 0. The gesture is not named.",
+      "rect": [
+        770,
+        0,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        22,
+        50,
+        104
+      ]
+    },
+    {
+      "id": 8,
+      "name": "008",
+      "source": 8,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Close to the standing frames. A small wing change is possible and not named.",
+      "rect": [
+        0,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        30,
+        151,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 9,
+      "name": "009",
+      "source": 9,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        110,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        140,
+        152,
+        50,
+        102
+      ]
+    },
+    {
+      "id": 10,
+      "name": "010",
+      "source": 10,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        220,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        251,
+        150,
+        47,
+        103
+      ]
+    },
+    {
+      "id": 11,
+      "name": "011",
+      "source": 11,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        330,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        149,
+        49,
+        104
+      ]
+    },
+    {
+      "id": 12,
+      "name": "012",
+      "source": 12,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        440,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        460,
+        149,
+        51,
+        104
+      ]
+    },
+    {
+      "id": 13,
+      "name": "013",
+      "source": 13,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        550,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        570,
+        149,
+        50,
+        105
+      ]
+    },
+    {
+      "id": 14,
+      "name": "014",
+      "source": 14,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        660,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        682,
+        149,
+        47,
+        104
+      ]
+    },
+    {
+      "id": 15,
+      "name": "015",
+      "source": 15,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Coat or wing position changes along the row. Not confirmed as one clip.",
+      "rect": [
+        770,
+        128,
+        110,
+        128
+      ],
+      "content_rect": [
+        791,
+        150,
+        49,
+        103
+      ]
+    },
+    {
+      "id": 16,
+      "name": "016",
+      "source": 16,
+      "category": "unknown",
+      "confidence": "low",
+      "note": "The drawing starts lower in the cell than frame 0 and still reaches the bottom. Pose not named.",
+      "rect": [
+        0,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        27,
+        287,
+        55,
+        95
+      ]
+    },
+    {
+      "id": 17,
+      "name": "017",
+      "source": 17,
+      "category": "unknown",
+      "confidence": "medium",
+      "note": "The drawing sits higher in the cell than the standing frames and does not reach their foot line. The move is not named.",
+      "rect": [
+        110,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        144,
+        270,
+        41,
+        95
+      ]
+    },
+    {
+      "id": 18,
+      "name": "018",
+      "source": 18,
+      "category": "arms",
+      "confidence": "high",
+      "note": "One arm is raised. The body is high in the cell.",
+      "rect": [
+        220,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        244,
+        259,
+        55,
+        93
+      ]
+    },
+    {
+      "id": 19,
+      "name": "019",
+      "source": 19,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "An arm is extended and the head is tilted. The body is high in the cell.",
+      "rect": [
+        330,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        353,
+        263,
+        63,
+        101
+      ]
+    },
+    {
+      "id": 20,
+      "name": "020",
+      "source": 20,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing, close to frame 0.",
+      "rect": [
+        440,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        279,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 21,
+      "name": "021",
+      "source": 21,
+      "category": "unknown",
+      "confidence": "low",
+      "note": "The drawing starts lower in the cell than frame 0 and still reaches the bottom. Pose not named.",
+      "rect": [
+        550,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        577,
+        287,
+        55,
+        95
+      ]
+    },
+    {
+      "id": 22,
+      "name": "022",
+      "source": 22,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Standing, close to frame 0.",
+      "rect": [
+        660,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        690,
+        279,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 23,
+      "name": "023",
+      "source": 23,
+      "category": "unknown",
+      "confidence": "low",
+      "note": "Differs from the standing frames. A face change is possible and not confirmed.",
+      "rect": [
+        770,
+        256,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        279,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 24,
+      "name": "024",
+      "source": 24,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        0,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        31,
+        408,
+        49,
+        102
+      ]
+    },
+    {
+      "id": 25,
+      "name": "025",
+      "source": 25,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        110,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        129,
+        409,
+        59,
+        101
+      ]
+    },
+    {
+      "id": 26,
+      "name": "026",
+      "source": 26,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        220,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        251,
+        408,
+        49,
+        102
+      ]
+    },
+    {
+      "id": 27,
+      "name": "027",
+      "source": 27,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        330,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        408,
+        50,
+        102
+      ]
+    },
+    {
+      "id": 28,
+      "name": "028",
+      "source": 28,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        440,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        469,
+        407,
+        49,
+        103
+      ]
+    },
+    {
+      "id": 29,
+      "name": "029",
+      "source": 29,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        550,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        582,
+        409,
+        58,
+        101
+      ]
+    },
+    {
+      "id": 30,
+      "name": "030",
+      "source": 30,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        660,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        689,
+        407,
+        49,
+        103
+      ]
+    },
+    {
+      "id": 31,
+      "name": "031",
+      "source": 31,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arms are held in front of the body. Neighbors are similar. Not confirmed as one clip.",
+      "rect": [
+        770,
+        384,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        408,
+        50,
+        102
+      ]
+    },
+    {
+      "id": 32,
+      "name": "032",
+      "source": 32,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        0,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        6,
+        552,
+        76,
+        86
+      ]
+    },
+    {
+      "id": 33,
+      "name": "033",
+      "source": 33,
+      "category": "lean",
+      "confidence": "medium",
+      "note": "A lean, with a leg forward. A kick is not confirmed.",
+      "rect": [
+        110,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        123,
+        546,
+        70,
+        91
+      ]
+    },
+    {
+      "id": 34,
+      "name": "034",
+      "source": 34,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        220,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        248,
+        533,
+        53,
+        104
+      ]
+    },
+    {
+      "id": 35,
+      "name": "035",
+      "source": 35,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        330,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        356,
+        541,
+        70,
+        96
+      ]
+    },
+    {
+      "id": 36,
+      "name": "036",
+      "source": 36,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        440,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        467,
+        551,
+        75,
+        87
+      ]
+    },
+    {
+      "id": 37,
+      "name": "037",
+      "source": 37,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        550,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        576,
+        542,
+        70,
+        95
+      ]
+    },
+    {
+      "id": 38,
+      "name": "038",
+      "source": 38,
+      "category": "lean",
+      "confidence": "high",
+      "note": "The torso leans. Hands on 32 and 36 come close to the cell edge.",
+      "rect": [
+        660,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        688,
+        533,
+        53,
+        104
+      ]
+    },
+    {
+      "id": 39,
+      "name": "039",
+      "source": 39,
+      "category": "lean",
+      "confidence": "medium",
+      "note": "A lean, with a leg forward. A kick is not confirmed.",
+      "rect": [
+        770,
+        512,
+        110,
+        128
+      ],
+      "content_rect": [
+        783,
+        544,
+        70,
+        93
+      ]
+    },
+    {
+      "id": 40,
+      "name": "040",
+      "source": 40,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        0,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        20,
+        660,
+        57,
+        106
+      ]
+    },
+    {
+      "id": 41,
+      "name": "041",
+      "source": 41,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        110,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        128,
+        660,
+        60,
+        106
+      ]
+    },
+    {
+      "id": 42,
+      "name": "042",
+      "source": 42,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        220,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        240,
+        660,
+        57,
+        106
+      ]
+    },
+    {
+      "id": 43,
+      "name": "043",
+      "source": 43,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        330,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        360,
+        662,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 44,
+      "name": "044",
+      "source": 44,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        440,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        471,
+        661,
+        57,
+        105
+      ]
+    },
+    {
+      "id": 45,
+      "name": "045",
+      "source": 45,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        550,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        661,
+        61,
+        105
+      ]
+    },
+    {
+      "id": 46,
+      "name": "046",
+      "source": 46,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        660,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        691,
+        660,
+        57,
+        106
+      ]
+    },
+    {
+      "id": 47,
+      "name": "047",
+      "source": 47,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Arm and wing positions. Not confirmed as one clip.",
+      "rect": [
+        770,
+        640,
+        110,
+        128
+      ],
+      "content_rect": [
+        800,
+        662,
+        50,
+        103
+      ]
+    },
+    {
+      "id": 48,
+      "name": "048",
+      "source": 48,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        0,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        22,
+        827,
+        78,
+        67
+      ]
+    },
+    {
+      "id": 49,
+      "name": "049",
+      "source": 49,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        110,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        143,
+        835,
+        63,
+        59
+      ]
+    },
+    {
+      "id": 50,
+      "name": "050",
+      "source": 50,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        220,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        243,
+        829,
+        64,
+        65
+      ]
+    },
+    {
+      "id": 51,
+      "name": "051",
+      "source": 51,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        330,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        355,
+        809,
+        64,
+        84
+      ]
+    },
+    {
+      "id": 52,
+      "name": "052",
+      "source": 52,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        440,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        465,
+        817,
+        62,
+        76
+      ]
+    },
+    {
+      "id": 53,
+      "name": "053",
+      "source": 53,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        550,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        569,
+        816,
+        73,
+        78
+      ]
+    },
+    {
+      "id": 54,
+      "name": "054",
+      "source": 54,
+      "category": "spin",
+      "confidence": "high",
+      "note": "Part of one roll, in sheet order.",
+      "rect": [
+        660,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        678,
+        826,
+        83,
+        68
+      ]
+    },
+    {
+      "id": 55,
+      "name": "055",
+      "source": 55,
+      "category": "spin",
+      "confidence": "medium",
+      "note": "The roll is finishing and the body is more upright.",
+      "rect": [
+        770,
+        768,
+        110,
+        128
+      ],
+      "content_rect": [
+        789,
+        816,
+        72,
+        78
+      ]
+    },
+    {
+      "id": 56,
+      "name": "056",
+      "source": 56,
+      "category": "kick",
+      "confidence": "high",
+      "note": "One leg is raised.",
+      "rect": [
+        0,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        26,
+        923,
+        60,
+        99
+      ]
+    },
+    {
+      "id": 57,
+      "name": "057",
+      "source": 57,
+      "category": "kick",
+      "confidence": "high",
+      "note": "One leg is raised.",
+      "rect": [
+        110,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        126,
+        928,
+        65,
+        94
+      ]
+    },
+    {
+      "id": 58,
+      "name": "058",
+      "source": 58,
+      "category": "kick",
+      "confidence": "medium",
+      "note": "A leg is lifted. The pose is less clear than 56 and 57.",
+      "rect": [
+        220,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        231,
+        925,
+        76,
+        97
+      ]
+    },
+    {
+      "id": 59,
+      "name": "059",
+      "source": 59,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Hands are near the waist. The supporting leg is down.",
+      "rect": [
+        330,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        344,
+        920,
+        67,
+        101
+      ]
+    },
+    {
+      "id": 60,
+      "name": "060",
+      "source": 60,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "Hands are together in front. Not a confirmed kick.",
+      "rect": [
+        440,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        465,
+        916,
+        57,
+        106
+      ]
+    },
+    {
+      "id": 61,
+      "name": "061",
+      "source": 61,
+      "category": "kick",
+      "confidence": "medium",
+      "note": "A leg is lifted. The pose is less clear than 56 and 57.",
+      "rect": [
+        550,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        577,
+        919,
+        57,
+        103
+      ]
+    },
+    {
+      "id": 62,
+      "name": "062",
+      "source": 62,
+      "category": "kick",
+      "confidence": "high",
+      "note": "One leg is raised.",
+      "rect": [
+        660,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        684,
+        923,
+        69,
+        99
+      ]
+    },
+    {
+      "id": 63,
+      "name": "063",
+      "source": 63,
+      "category": "arms",
+      "confidence": "medium",
+      "note": "A hand is near the head.",
+      "rect": [
+        770,
+        896,
+        110,
+        128
+      ],
+      "content_rect": [
+        794,
+        922,
+        54,
+        100
+      ]
+    },
+    {
+      "id": 64,
+      "name": "064",
+      "source": 64,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as three-quarter, toward the viewer.",
+      "rect": [
+        0,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        26,
+        1050,
+        58,
+        99
+      ]
+    },
+    {
+      "id": 65,
+      "name": "065",
+      "source": 65,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as a side view.",
+      "rect": [
+        110,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        141,
+        1052,
+        49,
+        97
+      ]
+    },
+    {
+      "id": 66,
+      "name": "066",
+      "source": 66,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as a side view with the coat toward the camera.",
+      "rect": [
+        220,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        248,
+        1053,
+        58,
+        96
+      ]
+    },
+    {
+      "id": 67,
+      "name": "067",
+      "source": 67,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as the back.",
+      "rect": [
+        330,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        361,
+        1053,
+        62,
+        96
+      ]
+    },
+    {
+      "id": 68,
+      "name": "068",
+      "source": 68,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as the back.",
+      "rect": [
+        440,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        470,
+        1052,
+        58,
+        97
+      ]
+    },
+    {
+      "id": 69,
+      "name": "069",
+      "source": 69,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as a side view.",
+      "rect": [
+        550,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        580,
+        1050,
+        47,
+        99
+      ]
+    },
+    {
+      "id": 70,
+      "name": "070",
+      "source": 70,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as three-quarter.",
+      "rect": [
+        660,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        686,
+        1047,
+        58,
+        102
+      ]
+    },
+    {
+      "id": 71,
+      "name": "071",
+      "source": 71,
+      "category": "turn",
+      "confidence": "high",
+      "note": "Turn. Read as the front.",
+      "rect": [
+        770,
+        1024,
+        110,
+        128
+      ],
+      "content_rect": [
+        793,
+        1048,
+        63,
+        102
+      ]
+    },
+    {
+      "id": 72,
+      "name": "072",
+      "source": 72,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        0,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        37,
+        1165,
+        36,
+        111
+      ]
+    },
+    {
+      "id": 73,
+      "name": "073",
+      "source": 73,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        110,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        147,
+        1165,
+        37,
+        110
+      ]
+    },
+    {
+      "id": 74,
+      "name": "074",
+      "source": 74,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        220,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        255,
+        1165,
+        40,
+        107
+      ]
+    },
+    {
+      "id": 75,
+      "name": "075",
+      "source": 75,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        330,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        364,
+        1165,
+        43,
+        105
+      ]
+    },
+    {
+      "id": 76,
+      "name": "076",
+      "source": 76,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        440,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        473,
+        1165,
+        45,
+        104
+      ]
+    },
+    {
+      "id": 77,
+      "name": "077",
+      "source": 77,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        550,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        584,
+        1165,
+        43,
+        105
+      ]
+    },
+    {
+      "id": 78,
+      "name": "078",
+      "source": 78,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        660,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        695,
+        1165,
+        40,
+        107
+      ]
+    },
+    {
+      "id": 79,
+      "name": "079",
+      "source": 79,
+      "category": "idle",
+      "confidence": "medium",
+      "note": "Front view, standing. Neighbors differ. The coat or the arms may move. The gesture is not named.",
+      "rect": [
+        770,
+        1152,
+        110,
+        128
+      ],
+      "content_rect": [
+        807,
+        1165,
+        37,
+        110
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "id": "body",
+      "name": "body"
+    },
+    {
+      "id": "left_arm",
+      "name": "left arm"
+    },
+    {
+      "id": "right_arm",
+      "name": "right arm"
+    },
+    {
+      "id": "left_leg",
+      "name": "left leg"
+    },
+    {
+      "id": "right_leg",
+      "name": "right leg"
+    },
+    {
+      "id": "beat_accents",
+      "name": "beat accents"
+    },
+    {
+      "id": "instrument",
+      "name": "instrument"
+    }
+  ],
+  "instruments": {
+    "kick": "kick",
+    "snare": "snare",
+    "hat": "hat",
+    "bass": "bass",
+    "perc": "perc",
+    "downbeat": "downbeat"
+  },
+  "animations": {
+    "body": {
+      "layer": "body",
+      "frames": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        72,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        74,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        66,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        68,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.000000000000004,
+      "loop": "loop",
+      "base": true,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "beat",
+        "grid": "sixteenth",
+        "beats_per_cycle": 8.0,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.0
+      },
+      "note": "One pose per beat: stand, front, front, stand, then the turn. Drum hits do not change this speed."
+    },
+    "kick": {
+      "layer": "left_leg",
+      "frames": [
+        56,
+        57,
+        62
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "kick",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.25,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.07
+      },
+      "trigger": "kick",
+      "note": "Leg raises on a kick."
+    },
+    "snare": {
+      "layer": "left_arm",
+      "frames": [
+        18,
+        60,
+        24
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "snare",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.25,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.08
+      },
+      "trigger": "snare",
+      "note": "Arm hits on a snare."
+    },
+    "hat": {
+      "layer": "right_arm",
+      "frames": [
+        9,
+        40,
+        41
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "hat",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.25,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.04
+      },
+      "trigger": "hat",
+      "note": "Small arm and wing accents on a hat."
+    },
+    "bass": {
+      "layer": "body",
+      "frames": [
+        32,
+        34,
+        36,
+        38
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "pingpong",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "bass",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.3333333333333333,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.1
+      },
+      "trigger": "bass",
+      "note": "Leans while the bass holds. One lean per beat.",
+      "paint": "frame"
+    },
+    "perc": {
+      "layer": "instrument",
+      "frames": [
+        48,
+        50,
+        52,
+        55
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "perc",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.3333333333333333,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.05
+      },
+      "trigger": "perc",
+      "note": "Roll accents on percussion."
+    },
+    "downbeat": {
+      "layer": "beat_accents",
+      "frames": [
+        0,
+        64
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "downbeat",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.16666666666666666,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.4
+      },
+      "trigger": "downbeat",
+      "note": "Standing pose, then the turn."
+    },
+    "tumble": {
+      "layer": "body",
+      "frames": [
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.6666666666666666,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.0
+      },
+      "note": "Frames 48\u201355 are one roll in sheet order. The sheet has no frame duration, so this is not a timed animation."
+    },
+    "turn": {
+      "layer": "body",
+      "frames": [
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.0,
+      "loop": "once",
+      "base": false,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "",
+        "grid": "sixteenth",
+        "beats_per_cycle": 0.6666666666666666,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.0
+      },
+      "note": "Frames 64\u201371 turn from a three-quarter view through the side and the back, then return toward the front. Timing is not in the image."
+    }
+  }
+}

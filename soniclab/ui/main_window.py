@@ -44,7 +44,7 @@ from soniclab.core.alignment import classify_onsets, matched_errors, nudged_alig
 from soniclab.core.tempo import stretch as stretch_audio
 from soniclab.core.audio_engine import OUTPUT_RATE, AudioEngine
 from soniclab.core.audio_loader import AudioLoader, Loaded, decode as decode_audio
-from soniclab.core.downbeat_loop import downbeat_loop_region, loop_shortcut
+from soniclab.core.downbeat_loop import arrangement_downbeats, downbeat_loop_region, loop_shortcut
 from soniclab.core.bar_export import (
     FORMATS,
     FORMATS_BY_KEY,
@@ -113,6 +113,7 @@ from soniclab.ui.inspector import Inspector
 from soniclab.ui.mixer import Mixer
 from soniclab.ui.stem_splitter import StemSplitterPanel
 from soniclab.ui.theme import DARK_STYLE, build_palette
+from soniclab.ui.dancer_view import DancerView
 from soniclab.ui.visualizer import Visualizer
 from soniclab.ui import ui_trace
 from soniclab.ui.timeline import (
@@ -494,6 +495,12 @@ class MainWindow(QMainWindow):
         self.visualizer = Visualizer()
         self.visualizer_dock = self._dock("Visualizer", self.visualizer, features)
         self.visualizer_dock.setObjectName("visualizerDock")
+        self.dancer = DancerView()
+        self.dancer.set_clock(self._dancer_clock)
+        self.dancer.set_audio(self._dancer_audio)
+        self.dancer.enabled_changed.connect(lambda _on: self._sync_capture())
+        self.dancer_dock = self._dock("Dancer", self.dancer, features)
+        self.dancer_dock.setObjectName("dancerDock")
         self.stem_splitter = StemSplitterPanel()
         self.stem_splitter.default_folder = lambda: default_stem_folder(
             self.current_path
@@ -514,11 +521,13 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.inspector_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.mixer_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.visualizer_dock)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dancer_dock)
         self.addDockWidget(
             Qt.DockWidgetArea.BottomDockWidgetArea, self.stem_splitter_dock
         )
         self.tabifyDockWidget(self.mixer_dock, self.visualizer_dock)
-        self.tabifyDockWidget(self.visualizer_dock, self.stem_splitter_dock)
+        self.tabifyDockWidget(self.visualizer_dock, self.dancer_dock)
+        self.tabifyDockWidget(self.dancer_dock, self.stem_splitter_dock)
         self.mixer_dock.raise_()
         self.visualizer_dock.visibilityChanged.connect(self._sync_capture)
         self.resizeDocks(
@@ -620,6 +629,7 @@ class MainWindow(QMainWindow):
             self.inspector_dock,
             self.mixer_dock,
             self.visualizer_dock,
+            self.dancer_dock,
             self.stem_splitter_dock,
         ):
             view_menu.addAction(dock.toggleViewAction())
@@ -642,6 +652,9 @@ class MainWindow(QMainWindow):
         self.onsets_action.setToolTip("Show onset timing against the beat reference")
         self.onsets_action.toggled.connect(lambda on: self._each_timeline(lambda view: view.set_show_onsets(on)))
         view_menu.addAction(self.onsets_action)
+        view_menu.addSeparator()
+        self._action(view_menu, "Sprite Animation &Editor…", self._open_sprite_editor)
+        self._action(view_menu, "Heart &Dancer", self._restore_heart_dancer)
         view_menu.addSeparator()
         self.second_canvas_action = QAction("Second Canvas", self)
         self.second_canvas_action.setCheckable(True)
@@ -3451,12 +3464,105 @@ class MainWindow(QMainWindow):
         return self.engine.read_track(int(source), count)
 
     def _sync_capture(self, *_args) -> None:
-        visible = self.visualizer.isVisible()
+        visible = self.visualizer.isVisible() or (
+            self.dancer.isVisible() and self.dancer.enabled
+        )
         if visible == self._capture_shown:
             return
         self._capture_shown = visible
         self.engine.set_capture(visible)
-        self.visualizer.set_active(visible)
+        self.visualizer.set_active(self.visualizer.isVisible())
+
+    def _open_sprite_editor(self) -> None:
+        editor = getattr(self, "_sprite_editor", None)
+        if editor is None:
+            from soniclab.ui.sprite_editor import SpriteEditorWindow
+
+            editor = SpriteEditorWindow()
+            editor.set_song_clock(self._sprite_song_clock)
+            editor.send_requested.connect(self._send_sprite_to_dancer)
+            self._sprite_editor = editor
+        editor.show()
+        editor.raise_()
+        editor.activateWindow()
+
+    def _sprite_song_clock(self) -> dict:
+        seconds, bpm, downs, _loop, playing = self._dancer_clock()
+        pose = self.dancer.pose
+        return {
+            "seconds": seconds,
+            "bpm": bpm,
+            "playing": playing,
+            "downbeats": list(downs),
+            "clock_frame": pose.frame,
+            "events": self.dancer.live_events(),
+            "levels": {
+                "kick": pose.layers.kick,
+                "snare": pose.layers.snare,
+                "hat": pose.layers.hat,
+                "bass": pose.layers.bass,
+                "perc": pose.layers.perc,
+                "downbeat": 1.0 if pose.on_downbeat else 0.0,
+            },
+        }
+
+    def _restore_heart_dancer(self) -> None:
+        self.dancer.restore_heart()
+        self.dancer_dock.show()
+        self.dancer_dock.raise_()
+        self.statusBar().showMessage("Heart dancer", 3000)
+
+    def _send_sprite_to_dancer(self, data: dict) -> None:
+        self.dancer.apply_sprite_project(data)
+        self.dancer_dock.show()
+        self.dancer_dock.raise_()
+        self.statusBar().showMessage("Dancer is using the sprite animation", 4000)
+
+    def _dancer_clock(self):
+        """Playback position, tempo, downbeats and loop. Not a wall clock."""
+        playing = bool(self.engine.playing)
+        seconds = self.engine.heard_position() if playing else float(self.engine.position)
+        bpm = float(self.project.bpm or 120.0)
+        return seconds, bpm, self._dancer_downbeats(), self.engine.loop, playing
+
+    def _dancer_audio(self):
+        """Latest master block and the arrangement time of its first sample.
+
+        The render head is ahead of ``heard_position`` by the output latency,
+        so a hit stamped here is drawn when it is actually heard.
+        """
+        audio = self.engine.read_master(2048)
+        count = int(audio.shape[0]) if getattr(audio, "ndim", 0) else 0
+        origin = float(self.engine.position) - count / OUTPUT_RATE
+        return audio, origin
+
+    def _dancer_downbeats(self) -> tuple[float, ...]:
+        now = time.monotonic()
+        cached = getattr(self, "_dancer_marks", None)
+        if cached is not None and now - cached[0] < 0.25:
+            return cached[1]
+        marks = self._dancer_downbeat_times()
+        self._dancer_marks = (now, marks)
+        return marks
+
+    def _dancer_downbeat_times(self) -> tuple[float, ...]:
+        tracks = self.project.tracks
+        if not tracks:
+            return ()
+        drum = self._drum_index()
+        index = drum if drum is not None else 0
+        if not (0 <= index < len(tracks)):
+            return ()
+        track = tracks[index]
+        events = self._track_events(track)
+        if not events:
+            return ()
+        return arrangement_downbeats(
+            events,
+            float(track.get("start", 0.0) or 0.0),
+            float(track.get("offset", 0.0) or 0.0),
+            float(track.get("alignment", 0.0) or 0.0),
+        )
 
     def _restore_view(self) -> None:
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
