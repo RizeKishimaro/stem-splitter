@@ -32,3 +32,8 @@ soniclab = "soniclab.main:main"
 [tool.setuptools.packages.find]
 include = ["soniclab*"]
 
+# The dancer sprites (sheets and sprite projects). The macOS installer and
+# updater pip-install this package, so files not listed here never arrive.
+[tool.setuptools.package-data]
+soniclab = ["assets/*.png", "assets/*.json", "assets/*/*.png", "assets/*/*.json"]
+
