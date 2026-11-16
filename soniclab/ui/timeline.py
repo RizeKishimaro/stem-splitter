@@ -252,9 +252,6 @@ class ClipItem(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, True)
 
         self.setZValue(3)
-        self.setToolTip(
-            f"{name} · {duration:.2f}s · drag to place · double-click the name to rename"
-        )
 
         footer = 14.0 if self._clip_height >= 36 else 0.0
         top = 4.0
@@ -394,7 +391,6 @@ class ClipItem(QGraphicsRectItem):
         title.setPos(8, max(2.0, self._clip_height - self._footer))
         title.setZValue(6)
         title.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        title.setToolTip("Double-click the name to rename")
         self._title = title
 
     def paint(self, painter, option, widget=None):
@@ -425,9 +421,16 @@ class ClipItem(QGraphicsRectItem):
             painter.setPen(QPen(QColor("#D7B36A"), 1))
             painter.drawRect(self.rect().adjusted(1, 1, -1, -1))
         self._paint_block_gaps(painter)
-        if self.picked:
+        # The blocks that count as selected (TimelineView.selected_blocks):
+        # the picked ones, or every block of a stem selected whole. They are
+        # drawn alike, so a block whose ▶ gave way to the shared one always
+        # shows as selected.
+        marked = self.picked
+        if not marked and option.state & QStyle.StateFlag.State_Selected:
+            marked = {span[0] for span in self._block_spans}
+        if marked:
             for span in self._block_spans:
-                if span[0] in self.picked:
+                if span[0] in marked:
                     block = QRectF(float(span[1]) + 1, 1, max(0.0, float(span[2]) - float(span[1]) - 2), self.rect().height() - 2)
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(QColor(215, 179, 106, 46))
@@ -463,10 +466,6 @@ class ClipItem(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, len(self._block_spans) <= 1)
         if len(self._block_spans) > 1:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
-            self.setToolTip(
-                f"{self.name} · drag a bar block to move just that block"
-                " · double-click the name to rename"
-            )
 
     def _block_rect(self, bar: int) -> QRectF | None:
         for span in self._block_spans or ((0, 0.0, float(self.rect().width()), 0.0, 0.0),):
@@ -1799,10 +1798,8 @@ class TimelineView(QGraphicsView):
                 # A placed bar can land on top of other audio on its row. It
                 # is drawn, and grabbed, above it.
                 clip.setZValue(4)
-            beats, tempo = self._beat_track(track, audio)
+            beats, _tempo = self._beat_track(track, audio)
             clip.set_beats(beats, offset_seconds, beats_per_bar, self.show_beats)
-            if tempo > 0:
-                clip.setToolTip(f"{clip.toolTip()} · {tempo:.1f} BPM detected")
             self._place_bar_blocks(
                 clip,
                 float(track.get("start", 0.0) or 0.0),
@@ -1872,8 +1869,8 @@ class TimelineView(QGraphicsView):
         for bar, left, right, _t0, _t1 in spans:
             inset_left = left + (3 if left > 1 else 0)
             inset_right = right - 3
-            if inset_right - inset_left < 22:
-                continue
+            if inset_right - inset_left < size + 2:
+                continue  # no room for a ▶ inside this block's edges
             button = BarPlayButton(self, bar)
             button.setParentItem(clip)
             button.setPos(

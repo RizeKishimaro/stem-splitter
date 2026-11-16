@@ -69,11 +69,14 @@ class EngineVoiceTests(unittest.TestCase):
         self.engine.preview_pause("ramp")
         silent = self.run_blocks(3)
         self.assertFalse(silent.any())
+        # Paused where it was heard: up to one block behind the render head.
+        held = self.engine._voices["ramp"].cursor
+        self.assertLessEqual(held, OUTPUT_RATE + 5 * BLOCK)
+        self.assertGreaterEqual(held, OUTPUT_RATE + 4 * BLOCK)
         self.engine.preview_play([("ramp", 0, 1.0, 3.0)])
         resumed = self.run_blocks(1)
-        expected = (OUTPUT_RATE + 5 * BLOCK) / (OUTPUT_RATE * 400)
-        self.assertAlmostEqual(float(resumed[0, 0]), expected, places=7)
-        self.assertEqual(self.engine._voices["ramp"].cursor, OUTPUT_RATE + 6 * BLOCK)
+        self.assertAlmostEqual(float(resumed[0, 0]), held / (OUTPUT_RATE * 400), places=7)
+        self.assertEqual(self.engine._voices["ramp"].cursor, held + BLOCK)
 
     def test_a_voice_ends_on_its_last_sample(self):
         frames = OUTPUT_RATE // 10

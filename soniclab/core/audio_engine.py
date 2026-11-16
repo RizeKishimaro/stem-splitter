@@ -22,6 +22,13 @@ LIMIT_RELEASE_SECONDS = 0.25
 # jump has no click and the cycle stays exactly end - start samples long.
 LOOP_XFADE = 64
 
+# A block voice's state (``AudioEngine.voice_states``). Each voice has its
+# own: pausing, resuming or stopping one never changes another's.
+STOPPED = "stopped"  # no voice under the key
+PLAYING = "playing"
+PAUSED = "paused"  # holds its place until resumed or stopped, however long
+COMPLETED = "completed"  # a block that plays once reached its end by itself
+
 
 class _Voice:
     """One stem block played on its own, apart from the transport.
@@ -38,7 +45,9 @@ class _Voice:
     of its track.
     """
 
-    __slots__ = ("key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "cycle")
+    __slots__ = (
+        "key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "cycle", "generation",
+    )
 
     def __init__(self, key, clip: int, start: int, end: int, group=None):
         self.key = key
@@ -57,6 +66,10 @@ class _Voice:
         # stay in time. The block sounds inside its own [start, end) of the
         # row. ``shift`` turns row time into its arrangement place.
         self.cycle = None
+        # Set by the engine when the voice is made: a key reused for a new
+        # voice gets a new number, so a pause, resume or stop meant for the
+        # old one (a late click, a stale callback) cannot reach the new one.
+        self.generation = 0
 
 
 class _Group:
@@ -240,8 +253,13 @@ class AudioEngine:
         # The one clock every block loop shares: frames since the first of
         # the voices now playing started. It moves on while any plays and
         # holds while none does. A loop started (or resumed) while others
-        # play joins it at its phase, so every loop keeps the same time.
+        # play joins it at its phase. Resuming keeps a voice's own place.
         self._master = 0
+        # Voice generations (see _Voice.generation), and the keys of blocks
+        # that played to their end by themselves, by generation.
+        self._generations = 0
+        self._completed: dict = {}
+        self._state_view: dict = {}
         self._limit_gain = 1.0
 
     @property
@@ -591,7 +609,8 @@ class AudioEngine:
                 group.cursor = group.next_cursor
                 group.fading = group.next_fading
         for key in finished:
-            del self._voices[key]
+            voice = self._voices.pop(key)
+            self._completed[key] = voice.generation
         if finished:
             self._drop_empty_groups()
         self._publish_previews(sounds_at)
@@ -787,7 +806,7 @@ class AudioEngine:
             if not going:
                 self._sharing(keys)  # with nothing else playing, the clock starts at zero
             for key, clip, a, b, shift, length in placed:
-                voice = _Voice(key, clip, a, b)
+                voice = self._new_voice(key, clip, a, b)
                 voice.shift = shift
                 voice.length = length
                 voice.cycle = (0, length)
@@ -797,12 +816,32 @@ class AudioEngine:
         self._ensure_stream()
 
     def _publish_previews(self, sounds_at: float | None = None) -> None:
-        when = time.monotonic() if sounds_at is None else sounds_at
+        """Swap in what the UI reads about each voice. From the callback,
+        ``sounds_at`` is when the block just written starts to sound. From
+        the UI thread (play, pause, resume) there is none: a voice whose
+        cursor did not move keeps the stamp of the block that moved it, so
+        pausing one voice does not shift the time shown for the others, and
+        a voice that starts or resumes reads its cursor as heard now."""
+        now = time.monotonic()
+        previous = self._preview_view
+        previous_groups = self._group_view
+        fresh = now - BLOCK_SIZE / OUTPUT_RATE  # interpolates to the cursor itself, now
+
+        def stamp(old, moving, cursor):
+            if sounds_at is not None:
+                return sounds_at
+            if old is not None and old[0] and moving and old[1] == cursor:
+                return old[2]
+            return fresh if moving else now
+
         clips = self._clips
         groups = self._groups
         view = {}
         for key, voice in self._voices.items():
+            old = previous.get(key)
+            old = (old[1], old[4], old[6]) if old is not None else None
             if voice.group is None:
+                when = stamp(old, voice.playing, voice.cursor)
                 if voice.cycle is not None:
                     own = voice.length or None
                     view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, voice.shift, when, voice.cycle, own)
@@ -818,13 +857,23 @@ class AudioEngine:
             # File frames, shown in arrangement time on this clip.
             # A paused stem shows where it was paused (``cursor``), still.
             moving = voice.playing and group.running
+            cursor = group.cursor if voice.playing else voice.cursor
             view[key] = (
                 voice.playing, moving, offset - voice.shift, end - voice.shift,
-                group.cursor if voice.playing else voice.cursor,
-                clip["start"] - offset + voice.shift, when, group.loop, _own_length(voice, group.loop),
+                cursor,
+                clip["start"] - offset + voice.shift, stamp(old, moving, cursor), group.loop, _own_length(voice, group.loop),
             )
         self._preview_view = view
-        self._group_view = {key: (group.running, group.cursor, when, group.loop) for key, group in groups.items()}
+        states = {key: (COMPLETED, generation) for key, generation in self._completed.items()}
+        for key, voice in self._voices.items():
+            states[key] = (PLAYING if voice.playing else PAUSED, voice.generation)
+        self._state_view = states
+        group_view = {}
+        for key, group in groups.items():
+            old = previous_groups.get(key)
+            old = (old[0], old[1], old[2]) if old is not None else None
+            group_view[key] = (group.running, group.cursor, stamp(old, group.running, group.cursor), group.loop)
+        self._group_view = group_view
 
     def _sounds_at(self, time_info) -> float:
         """Monotonic time at which the block being written starts to sound."""
@@ -874,7 +923,7 @@ class AudioEngine:
                 first = max(0, int(round(float(start) * OUTPUT_RATE)))
                 last = int(round(float(end) * OUTPUT_RATE))
                 if last > first:
-                    self._voices[key] = _Voice(key, clip, first, last)
+                    self._voices[key] = self._new_voice(key, clip, first, last)
             self._publish_previews()
         self._ensure_stream()
 
@@ -912,7 +961,7 @@ class AudioEngine:
                 key, clip = member[0], int(member[1])
                 voice = self._voices.get(key)
                 if voice is None or voice.group != group:
-                    voice = _Voice(key, clip, 0, 0, group)
+                    voice = self._new_voice(key, clip, 0, 0, group)
                     self._voices[key] = voice
                 voice.clip = clip
                 voice.playing = True
@@ -972,44 +1021,69 @@ class AudioEngine:
             frame = _wrap(frame, loop)
         return frame / OUTPUT_RATE
 
-    def preview_resume(self, keys) -> None:
-        """Play paused voices on from where each one stopped, together."""
+    def preview_resume(self, keys, generations: dict | None = None) -> None:
+        """Play paused voices on from where each one stopped, together.
+
+        A voice keeps its own place: resuming never moves it to another
+        voice's time. A stem whose split is still playing goes on at the
+        split's shared position, on the same sample as its other stems."""
         with self._lock:
-            keys = [key for key in keys if key in self._voices]
-            # Back on the shared clock, which held while nothing played:
-            # loops resume at its phase, so a loop paused earlier than the
-            # rest comes back in time with them.
-            idle = {voice.group for voice in self._voices.values() if voice.group is not None}
-            idle -= {voice.group for voice in self._voices.values() if voice.group is not None and voice.playing}
             for key in keys:
-                voice = self._voices[key]
-                if voice.cycle is not None:
-                    voice.cursor = self._master % voice.cycle[1]
-                elif voice.group in idle and voice.group in self._groups:
-                    self._join_group(self._groups[voice.group])
-            for key in keys:
-                self._voices[key].playing = True
+                voice = self._voices.get(key)
+                if voice is not None and self._current(key, (generations or {}).get(key)):
+                    voice.playing = True
             self._publish_previews()
         self._ensure_stream()
 
-    def preview_pause(self, key) -> None:
+    def preview_pause(self, key, generation: int | None = None) -> None:
+        """Pause one voice where it is heard now, not where the render head
+        is (an audio block and the output latency ahead), so resuming plays
+        on from the sample the listener stopped at. Other voices go on."""
         with self._lock:
             voice = self._voices.get(key)
-            if voice is not None:
-                if voice.group is not None and voice.playing:
+            if voice is not None and voice.playing and self._current(key, generation):
+                if voice.group is not None:
+                    group = self._groups.get(voice.group)
                     heard = self.group_position(voice.group)
-                    if heard is not None:
-                        voice.cursor = int(round(heard * OUTPUT_RATE))
-                        group = self._groups.get(voice.group)
-                        own = _own_length(voice, group.loop if group else None)
+                    if group is not None and heard is not None:
+                        frame = int(round(heard * OUTPUT_RATE))
+                        voice.cursor = frame
+                        own = _own_length(voice, group.loop)
                         if own is not None:
-                            voice.cursor = group.loop[0] + (voice.cursor - group.loop[0]) % own
+                            voice.cursor = group.loop[0] + (frame - group.loop[0]) % own
+                        others = any(
+                            other.playing for other in self._voices.values()
+                            if other is not voice and other.group == voice.group
+                        )
+                        if not others:
+                            # The split's clock holds where it was heard.
+                            group.cursor = group.next_cursor = frame
+                            group.fading = group.next_fading = False
+                else:
+                    frame = self._heard_frame(key)
+                    if frame is not None:
+                        voice.cursor = frame
                 voice.playing = False
             self._publish_previews()
 
-    def preview_stop(self, key) -> None:
+    def _heard_frame(self, key) -> int | None:
+        """Where a block voice's own cursor is heard now (lock held)."""
+        entry = self._preview_view.get(key)
+        if entry is None or not entry[1]:
+            return None
+        _playing, _moving, _start, _end, cursor, _base, sounds_at, loop, _own = entry
+        frame = cursor - BLOCK_SIZE + (time.monotonic() - sounds_at) * OUTPUT_RATE
+        if loop is not None and frame < loop[0] <= cursor:
+            frame += loop[1] - loop[0]
+        frame = _wrap(frame, loop)
+        return max(0, int(round(frame)))
+
+    def preview_stop(self, key, generation: int | None = None) -> None:
         with self._lock:
+            if not self._current(key, generation):
+                return
             self._voices.pop(key, None)
+            self._completed.pop(key, None)
             self._drop_empty_groups()
             self._publish_previews()
 
@@ -1032,7 +1106,33 @@ class AudioEngine:
         with self._lock:
             self._voices.clear()
             self._groups.clear()
+            self._completed.clear()
             self._publish_previews()
+
+    def _new_voice(self, key, clip, start, end, group=None) -> _Voice:
+        """A voice with a fresh generation (lock held)."""
+        self._generations += 1
+        voice = _Voice(key, clip, start, end, group)
+        voice.generation = self._generations
+        self._completed.pop(key, None)
+        return voice
+
+    def _current(self, key, generation) -> bool:
+        """Whether a request for ``generation`` (None: any) is for the voice
+        under ``key`` now (lock held). A stale one is ignored."""
+        if generation is None:
+            return True
+        voice = self._voices.get(key)
+        return voice is not None and voice.generation == int(generation)
+
+    def voice_states(self) -> dict:
+        """``key -> (state, generation)`` for every voice and every block
+        that completed, from the engine's own state. Lock-free. A key that
+        is absent is ``STOPPED``."""
+        return dict(self._state_view)
+
+    def voice_state(self, key) -> tuple[str, int]:
+        return self._state_view.get(key, (STOPPED, 0))
 
     def previews(self, now: float | None = None) -> dict:
         """``key -> (playing, seconds)`` for every preview voice.

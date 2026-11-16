@@ -1214,7 +1214,8 @@ class MainWindow(QMainWindow):
         if not (added and self.project.tracks):
             self.statusBar().clearMessage()
             return
-        self._select_track(len(self.project.tracks) - 1)
+        # Point at the new track; do not select it whole (see _select_after_split).
+        self._on_track_selected(len(self.project.tracks) - 1)
         self._queue_beat_sources(imported)
         lead = self.project.tracks[drum].get("name") if drum is not None else None
         if reused:
@@ -1291,7 +1292,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_after_split(kept, len(self.project.tracks) - len(added))
+        self._select_after_split(kept, len(self.project.tracks) - len(added), select=False)
         self._queue_beat_sources(track["path"] for track in added)
         drum = self._drum_index()
         lead = self.project.tracks[drum].get("name") if drum is not None else "none"
@@ -1368,7 +1369,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_after_split(kept, len(self.project.tracks) - len(added))
+        self._select_after_split(kept, len(self.project.tracks) - len(added), select=False)
         self._queue_beat_sources(track["path"] for track in added)
         drum = self._drum_index()
         lead = self.project.tracks[drum].get("name") if drum is not None else "none"
@@ -2078,11 +2079,15 @@ class MainWindow(QMainWindow):
             restored = restored or bool(selected or view.picks())
         return restored
 
-    def _select_after_split(self, kept, index: int, drop=()) -> None:
+    def _select_after_split(self, kept, index: int, drop=(), select: bool = True) -> None:
         """After a split: the tracks that were selected stay selected (and
         their loop keeps going); ``index`` becomes the track the clip
-        commands act on. With nothing selected before, ``index`` is selected."""
-        if self._restore_selection(kept, drop):
+        commands act on. With nothing selected before, ``index`` is selected,
+        unless ``select`` is False: new tracks (stems, imports) are only
+        pointed at. Selecting a whole stem selects all its blocks, which
+        trades their own ▶ for the shared one, so a fresh stem would show
+        up without its play buttons."""
+        if self._restore_selection(kept, drop) or not select:
             self._on_track_selected(index)
         else:
             self._select_track(index)
@@ -2840,7 +2845,7 @@ class MainWindow(QMainWindow):
     def _fill_more_menu(self, menu, view, clip, block, bar) -> None:
         """Everything the block menu used to hold."""
         states = self.engine.previews()
-        key = self._voice_key(*block)
+        key = self._block_voice(*block, states)
         state = states.get(key)
         playing = state is not None and state[0]
         menu.addAction(f"{'Pause' if playing else 'Play'} This Block", lambda: self._toggle_block(*block))
@@ -2918,7 +2923,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         states = self.engine.previews()
         if block is not None:
-            key = self._voice_key(*block)
+            key = self._block_voice(*block, states)
             state = states.get(key)
             playing = state is not None and state[0]
             if key[1] < 0:
@@ -3115,7 +3120,8 @@ class MainWindow(QMainWindow):
             self._remember_path(path)
             self._refresh_timeline()
             if self._selected >= 0:
-                self._select_track(self._selected)
+                # Point at it; a whole selected stem would trade its own ▶ for the shared one.
+                self._on_track_selected(self._selected)
             self._set_session_title()
             self._last_bpm = float(self.bpm.value())
             self._last_signature = self.signature.currentText()
@@ -3269,10 +3275,8 @@ class MainWindow(QMainWindow):
                 self._selected = len(self.project.tracks) - 1
             self._refresh_timeline()
             self._set_session_title()
-            if self._selected >= 0:
-                self._select_track(self._selected)
-            else:
-                self._on_track_selected(-1)
+            # Point at the same track again without selecting it whole.
+            self._on_track_selected(self._selected if self._selected >= 0 else -1)
         finally:
             self._history_frozen = False
 
@@ -3541,7 +3545,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_after_split(kept, index, drop={id(track)})
+        self._select_after_split(kept, index, drop={id(track)}, select=False)
 
     def _split_stem_in_half(self, index: int, local_start: float = 0.0, local_duration: float = -1.0) -> None:
         """Cut the block under the scissor in half, on the same row, in place.
@@ -4352,23 +4356,39 @@ class MainWindow(QMainWindow):
             return int(track), stem_block(bar)
         return int(track), int(bar)
 
+    def _block_voice(self, track: int, bar: int, states: dict) -> tuple[int, int]:
+        """The voice that plays this block now. A block can sound through a
+        combined loop (key ``(track, bar)``) or through its stem's clock
+        (``_voice_key``); ▶ / ⏸ must act on that one, not start a second
+        voice for the same block. With neither, the key a new one gets."""
+        own = self._voice_key(track, bar)
+        if own not in states and (int(track), int(bar)) in states:
+            return int(track), int(bar)
+        return own
+
     def _toggle_block(self, track: int, bar: int) -> None:
         """▶ / ⏸ on a block. On one of several selected blocks it plays the
         whole selection combined, as one loop; on any other block it plays
         just that block."""
         chosen_blocks = self._selected_blocks()
-        if (track, bar) in chosen_blocks and len(chosen_blocks) > 1:
+        # A stem in a synced loop (Repeat / Loop) plays that loop, even with
+        # its blocks still picked: the loop is the one the user just made.
+        synced = 0 <= track < len(self.project.tracks) and stem_loop(self.project.tracks[track]) is not None
+        if (track, bar) in chosen_blocks and len(chosen_blocks) > 1 and not synced:
             self._toggle_combined_loop(chosen_blocks)
             return
-        key = self._voice_key(track, bar)
         states = self.engine.previews()
+        key = self._block_voice(track, bar, states)
         state = states.get(key)
         chosen = id(self.project.tracks[track]) in self._chosen_tracks()
+        # The voice this click is about: a later voice under the same key
+        # (restarted meanwhile) is not paused or resumed by it.
+        generation = self.engine.voice_state(key)[1] or None
         if state is not None and state[0]:
             if chosen:
                 self._pause_selected()  # the selected tracks pause together
             else:
-                self.engine.preview_pause(key)  # an unselected track: just this one
+                self.engine.preview_pause(key, generation)  # an unselected track: just this one
                 self._sync_previews()
             return
         if state is not None:
@@ -4381,7 +4401,7 @@ class MainWindow(QMainWindow):
                     if not playing and self._key_chosen(other)
                 ]
             try:
-                self.engine.preview_resume(paused)
+                self.engine.preview_resume(paused, {key: generation} if generation else None)
             except Exception as exc:
                 QMessageBox.critical(self, "Audio output error", f"Could not play the block.\n\n{exc}")
             self._sync_previews()
