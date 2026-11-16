@@ -281,6 +281,43 @@ class StabilityTests(unittest.TestCase):
         self.assertAlmostEqual(piece["start"], 2.5, places=3)
         self.assertNotIn("canvas", piece)
 
+    def test_a_block_dropped_near_another_on_canvas_two_lands_flush(self):
+        # The last bar block ends with the track, at 8.0 s, between beats
+        # (bar 1 is at 0.37 s, so beats fall on .37 and .87). A block dropped
+        # a few pixels after it locks to its end instead of the next beat.
+        window = self.window
+        window.project.bars = [0.37, 2.37, 4.37, 6.37, 8.37]
+        window._refresh_timeline()
+        view, view2 = window.timeline, window.timeline2
+        clip = self.clips(view)[0]
+        first = self.grab_point(clip, 6.37 + 0.3)  # drums bar 4 (6.37-8.0 s)
+        self.drag(view, first, view2, QPointF(0.37 * PIXELS_PER_SECOND + 0.3 * PIXELS_PER_SECOND, 60))
+        placed = self.track("drums · bar 4")
+        self.assertEqual(placed["canvas"], 1)
+        self.assertAlmostEqual(placed["start"], 0.37, places=6)
+        end = placed["start"] + placed["duration"]  # 2.0 s: not on a beat
+        # Bass bar 2 (2.37-4.37 s), dropped 6 px after the placed block's end.
+        bass = self.clips(view)[window.project.tracks.index(self.track("bass"))]
+        grab = self.grab_point(bass, 2.37 + 0.3)
+        target = QPointF(end * PIXELS_PER_SECOND + 6 + 0.3 * PIXELS_PER_SECOND, 60)
+        self.drag(view, grab, view2, target)
+        piece = self.track("bass · bar 2")
+        self.assertEqual(piece["canvas"], 1)
+        self.assertAlmostEqual(piece["start"], end, places=6)  # flush, no gap
+
+    def test_a_block_dragged_beside_another_on_its_canvas_lands_flush(self):
+        window = self.window
+        window.project.bars = [0.37, 2.37, 4.37, 6.37, 8.37]
+        window._refresh_timeline()
+        view = window.timeline
+        bass = self.clips(view)[1]
+        grab = self.grab_point(bass, 2.37 + 0.3)  # bass bar 2
+        # Its start 4 px after the end of the drums track (8.0 s, between beats).
+        left = 8.0 * PIXELS_PER_SECOND + 4
+        self.drag(view, grab, view, QPointF(left + 0.3 * PIXELS_PER_SECOND, grab.y()))
+        piece = self.track("bass · bar 2")
+        self.assertAlmostEqual(piece["start"], 8.0, places=6)
+
     def test_picked_blocks_move_in_one_batch(self):
         window = self.window
         window.timeline.set_picks({0: {1}, 1: {1}})

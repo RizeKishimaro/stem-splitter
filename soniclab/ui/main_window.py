@@ -1,3 +1,4 @@
+import bisect
 import os
 import tempfile
 import time
@@ -214,6 +215,8 @@ class MainWindow(QMainWindow):
         # Stem blocks playing on their own, apart from the transport:
         # (track, bar) -> the track they belong to, to notice edits.
         self._preview_tracks: dict = {}
+        self._input_depth = 0
+        self._chosen_at_input: set[int] = set()
         self._lane_ids = 1
         self._canvases_rebuilding = False
         self._gesture_before = None
@@ -879,6 +882,7 @@ class MainWindow(QMainWindow):
             timeline.on_trim = self._trim_clip
             timeline.on_release = self._clip_released
             timeline.on_block_move = self._move_block
+            timeline.on_input = self._canvas_input
             timeline.seek_requested.connect(
                 lambda seconds, canvas=timeline.canvas: self._seek_on_canvas(canvas, seconds)
             )
@@ -933,6 +937,7 @@ class MainWindow(QMainWindow):
             headers.resize_committed.connect(self._on_track_resized)
             headers.unavailable.connect(self._unavailable)
             headers.rename_requested.connect(self._rename_track_at)
+            headers.menu_requested.connect(self._track_menu)
             headers.play_requested.connect(lambda canvas=timeline.canvas: self._play_canvas(canvas))
         self.mixer.selected.connect(self._select_track)
         self.mixer.gain_changed.connect(self._set_gain)
@@ -1273,6 +1278,7 @@ class MainWindow(QMainWindow):
         self.loader.submit(files, lambda results: self._finish_split_stems(name, stems, order, results))
 
     def _finish_split_stems(self, name: str, stems: dict, order: tuple, results) -> None:
+        kept = self._selection_by_track()
         self._remember_edit()
         try:
             added = self._add_stem_tracks(name, stems, order, results=results)
@@ -1285,7 +1291,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(len(self.project.tracks) - len(added))
+        self._select_after_split(kept, len(self.project.tracks) - len(added))
         self._queue_beat_sources(track["path"] for track in added)
         drum = self._drum_index()
         lead = self.project.tracks[drum].get("name") if drum is not None else "none"
@@ -1351,6 +1357,7 @@ class MainWindow(QMainWindow):
         self.loader.submit(files, lambda results: self._finish_stems(name, result, results))
 
     def _finish_stems(self, name: str, result, results) -> None:
+        kept = self._selection_by_track()
         self._remember_edit()
         try:
             added = self._add_stem_tracks(name, result.stems, results=results)
@@ -1361,7 +1368,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(len(self.project.tracks) - len(added))
+        self._select_after_split(kept, len(self.project.tracks) - len(added))
         self._queue_beat_sources(track["path"] for track in added)
         drum = self._drum_index()
         lead = self.project.tracks[drum].get("name") if drum is not None else "none"
@@ -2042,6 +2049,44 @@ class MainWindow(QMainWindow):
         self._clear_selection(view.peer)
         view.select_index(index)
 
+    def _selection_by_track(self) -> list:
+        """The picked blocks and selected clips of each canvas, by track
+        identity, so they survive an edit that inserts or reorders tracks."""
+        tracks = self.project.tracks
+        kept = []
+        for view in self._timelines():
+            picks = {id(tracks[i]): bars for i, bars in view.picks().items() if 0 <= i < len(tracks)}
+            clips = {id(tracks[i]) for i in view.selected_indices() if 0 <= i < len(tracks)}
+            kept.append((view, picks, clips))
+        return kept
+
+    def _restore_selection(self, kept, drop=()) -> bool:
+        """Put back what ``_selection_by_track`` saved, at the tracks' new
+        indices, leaving out the tracks in ``drop`` (and any that went).
+        Returns whether anything is selected again."""
+        where = {id(track): index for index, track in enumerate(self.project.tracks)}
+        restored = False
+        for view, picks, clips in kept:
+            selected = {where[key] for key in clips if key in where and key not in drop}
+            view.scene_obj.blockSignals(True)
+            try:
+                for clip in view._clip_items():
+                    clip.setSelected(clip.clip_index in selected)
+            finally:
+                view.scene_obj.blockSignals(False)
+            view.set_picks({where[key]: bars for key, bars in picks.items() if key in where and key not in drop})
+            restored = restored or bool(selected or view.picks())
+        return restored
+
+    def _select_after_split(self, kept, index: int, drop=()) -> None:
+        """After a split: the tracks that were selected stay selected (and
+        their loop keeps going); ``index`` becomes the track the clip
+        commands act on. With nothing selected before, ``index`` is selected."""
+        if self._restore_selection(kept, drop):
+            self._on_track_selected(index)
+        else:
+            self._select_track(index)
+
     def _deselect_all(self) -> bool:
         """Clear the selected clips and picked blocks on both canvases, and
         stop the paused blocks (their grey tint and line go). Blocks still
@@ -2547,6 +2592,7 @@ class MainWindow(QMainWindow):
         replaced = {}  # id(track) -> remaining segments
         for index, items in grouped.items():
             track = tracks[index]
+            self._keep_stem_grid(track)
             relative = source_rows[index] - base
             start = float(track.get("start", 0.0) or 0.0)
             offset = float(track.get("offset", 0.0) or 0.0)
@@ -2701,6 +2747,127 @@ class MainWindow(QMainWindow):
         view._unselect_handled = True
         self._drop_stem_from_selection(view, clip)
 
+    def _track_menu(self, index: int, global_pos) -> None:
+        """Right-click on a track's name: what can be done to the track."""
+        if not (0 <= index < len(self.project.tracks)):
+            return
+        self._select_track(index)
+        menu = QMenu(self)
+        menu.addAction("Stop", self._stop)
+        menu.addSeparator()
+        for action in (self.rename_action, self.mute_action, self.solo_action, self.move_start_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        for action in (self.duplicate_action, self.analyze_action, self.onset_action, self.reference_action):
+            menu.addAction(action)
+        self._sync_clip_actions()
+        menu.addMenu(self.downbeat_menu)
+        for action in (self.canvas_move_action, self.move_up_action, self.move_down_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction(self.delete_action)
+        menu.exec(global_pos)
+
+    def _block_menu(self, view, clip, block, pos) -> None:
+        """Right-click on a block: the few things done most, and the rest
+        under More."""
+        index, bar = block
+        picked = bar in view.picks().get(index, ())
+        menu = QMenu(self)
+        if picked or clip.isSelected():
+            menu.addAction("Unselect", lambda: self._unselect_block(view, clip, bar))
+        else:
+            menu.addAction("Select", lambda: view.toggle_pick(index, bar))
+        if sum(len(bars) for other in self._timelines() for bars in other.picks().values()) > 1:
+            menu.addAction("Unselect All", self._unselect_all_blocks)
+        menu.addSeparator()
+        span = next((span for span in view._spans_of(clip) if int(span[0]) == bar), None)
+        if span is not None:
+            menu.addAction(
+                "Split in Half",
+                lambda: self._split_stem_in_half(index, float(span[3]), float(span[4]) - float(span[3])),
+            )
+        menu.addAction("Repeat / Loop", lambda: self._loop_block(view, index, bar))
+        menu.addAction("Stop", self._stop)
+        menu.addSeparator()
+        more = menu.addMenu("More")
+        self._fill_more_menu(more, view, clip, block, view.bar_under(pos))
+        # Opening the menu leaves the selection as it is. Only More, whose
+        # commands act on the selected track, selects this one when opened.
+        more.aboutToShow.connect(lambda index=clip.clip_index: self._target_track(index))
+        menu.exec(view.viewport().mapToGlobal(pos))
+
+    def _target_track(self, index: int) -> None:
+        """Make ``index`` the track the clip commands act on, unless it is
+        already selected (then the selection stays as it is)."""
+        if index not in self._selection():
+            self._select_track(index)
+        self._sync_clip_actions()
+
+    def _unselect_block(self, view, clip, bar: int) -> None:
+        before = self._chosen_tracks()
+        self._unselect_block_only(view, clip, bar)
+        self._stop_unselected(before - self._chosen_tracks())
+
+    def _unselect_block_only(self, view, clip, bar: int) -> None:
+        index = clip.clip_index
+        picks = view.picks()
+        if bar in picks.get(index, ()):
+            view.toggle_pick(index, bar)
+        if not view.picks().get(index) and clip.isSelected():
+            clip.setSelected(False)
+
+    def _unselect_all_blocks(self) -> None:
+        before = self._chosen_tracks()
+        for view in self._timelines():
+            view.set_picks({})
+            view.scene_obj.clearSelection()
+        self._stop_unselected(before - self._chosen_tracks())
+
+    def _loop_block(self, view, index: int, bar: int) -> None:
+        """Repeat this block: a split stem loops it (with any other picked
+        blocks) in sync; another track loops the song over it."""
+        tracks = self.project.tracks
+        if 0 <= index < len(tracks) and stem_group(tracks[index]):
+            if bar not in view.picks().get(index, ()):
+                view.add_pick(index, bar)
+            self._loop_picked_stems()
+            return
+        times = view.block_times(index, bar)
+        if times is not None:
+            self._engage_loop(*times)
+
+    def _fill_more_menu(self, menu, view, clip, block, bar) -> None:
+        """Everything the block menu used to hold."""
+        states = self.engine.previews()
+        key = self._voice_key(*block)
+        state = states.get(key)
+        playing = state is not None and state[0]
+        menu.addAction(f"{'Pause' if playing else 'Play'} This Block", lambda: self._toggle_block(*block))
+        if any(other.picks() for other in self._timelines()):
+            menu.addAction("Play Picked Blocks Together", self._play_picked_blocks)
+            menu.addAction("Move Picked Blocks to Other Canvas", self._move_selected_to_other_canvas)
+        if stem_loop(self.project.tracks[block[0]]) is not None:
+            menu.addAction("Remove This Stem from the Synced Loop", lambda index=block[0]: self._remove_from_stem_loop(index))
+            menu.addAction("Clear the Synced Loop", lambda index=block[0]: self._clear_stem_loop(index))
+        menu.addSeparator()
+        if bar >= 0:
+            self._add_bar_actions(menu, bar)
+            menu.addSeparator()
+        if self.project.tracks[clip.clip_index].get("bars"):
+            menu.addAction("Cut This Stem on the Song's Bars", lambda index=clip.clip_index: self._use_song_bars(index))
+        for action in (self.rename_action, self.move_start_action, self.mute_action, self.solo_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        for action in (self.split_action, self.duplicate_action, self.analyze_action, self.onset_action,
+                       self.reference_action, self.nudge_action):
+            menu.addAction(action)
+        menu.addMenu(self.downbeat_menu)
+        for action in (self.canvas_move_action, self.move_up_action, self.move_down_action):
+            menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction(self.delete_action)
+
     def _right_click_unselects(self, view, clip) -> bool:
         """A right-click drops a split stem that is selected, and one of
         several selected tracks. A track that is not selected keeps its menu."""
@@ -2744,13 +2911,11 @@ class MainWindow(QMainWindow):
             return
         bar = view.bar_under(pos)
         clip = view.clip_at(pos)
-        if clip is not None and self._right_click_unselects(view, clip):
-            # Right-click takes this stem out. A split stem is selected by
-            # its bars as well as its outline; both go, and the others stay.
-            self._drop_stem_from_selection(view, clip)
+        block = view.block_at(pos)
+        if clip is not None and block is not None:
+            self._block_menu(view, clip, block, pos)
             return
         menu = QMenu(self)
-        block = view.block_at(pos)
         states = self.engine.previews()
         if block is not None:
             key = self._voice_key(*block)
@@ -2784,6 +2949,8 @@ class MainWindow(QMainWindow):
         if menu.actions():
             menu.addSeparator()
         self._select_track(clip.clip_index)
+        if self.project.tracks[clip.clip_index].get("bars"):
+            menu.addAction("Cut This Stem on the Song's Bars", lambda index=clip.clip_index: self._use_song_bars(index))
         menu.addAction(self.rename_action)
         menu.addAction(self.move_start_action)
         menu.addAction(self.mute_action)
@@ -3212,6 +3379,7 @@ class MainWindow(QMainWindow):
         if not (0 <= index < len(self.project.tracks)):
             return
         track = self.project.tracks[index]
+        self._keep_stem_grid(track)
         start = float(track.get("start", 0.0))
         duration = float(track.get("duration", 0.0) or 0.0)
         offset = float(track.get("offset", 0.0) or 0.0)
@@ -3299,11 +3467,60 @@ class MainWindow(QMainWindow):
         self._select_track(piece_index)
         self.statusBar().showMessage(f"Moved bar {int(bar) + 1}", 2000)
 
+    def _keep_stem_grid(self, track: dict) -> None:
+        """Before a stem is cut into pieces, give it a bar grid of its own.
+
+        The grid is in the stem's audio-file time, so every piece copied
+        from the track carries the same grid and it moves with each piece.
+        Applied downbeats of the stem itself give it; otherwise the song's
+        bars where the stem sits now. A stem that has a grid keeps it.
+        """
+        if track.get("bars"):
+            return
+        shift = float(track.get("offset", 0.0) or 0.0) - float(track.get("start", 0.0) or 0.0)
+        own = [float(time) for time, position in (track.get("downbeats") or []) if int(position) == 1]
+        if len(own) >= 2:
+            track["bars"] = sorted(round(time, 6) for time in own)
+            return
+        view = self._view_for(self.project.tracks.index(track)) if track in self.project.tracks else self.timeline
+        lines = view.bar_lines
+        if len(lines) < 2:
+            return
+        start = float(track.get("start", 0.0) or 0.0)
+        end = start + float(track.get("duration", 0.0) or 0.0)
+        # The lines over the clip, and one either side so the grid has an edge.
+        first = max(0, bisect.bisect_right(lines, start) - 1)
+        last = min(len(lines), bisect.bisect_left(lines, end) + 1)
+        kept = [round(line + shift, 6) for line in lines[first : last + 1]]
+        if len(kept) < 2:
+            return
+        track["bars"] = kept
+        # The same file is the same stem: its other tracks share the grid.
+        path = track.get("path")
+        for other in self.project.tracks:
+            if path and other is not track and other.get("path") == path and not other.get("bars"):
+                other["bars"] = list(kept)
+
+    def _use_song_bars(self, index: int) -> None:
+        """Forget a stem's own grid (all its pieces): cut it on the song's bars."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return
+        path = tracks[index].get("path")
+        self._remember_edit()
+        for track in tracks:
+            if track is tracks[index] or (path and track.get("path") == path):
+                track.pop("bars", None)
+        self._commit_edit()
+        self._refresh_timeline()
+        self.statusBar().showMessage("This stem follows the song's bars again", 3000)
+
     def _split_selected(self) -> None:
         index = self._selected
         if not (0 <= index < len(self.project.tracks)):
             return
         track = self.project.tracks[index]
+        self._keep_stem_grid(track)
         start = float(track.get("start", 0.0))
         duration = float(track.get("duration", 0.0) or 0.0)
         local = float(self.engine.position) - start
@@ -3312,6 +3529,7 @@ class MainWindow(QMainWindow):
                 "Move the playhead inside the clip to split", 3000
             )
             return
+        kept = self._selection_by_track()
         self._remember_edit()
         tail = dict(track)
         tail["start"] = start + local
@@ -3323,7 +3541,7 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(index)
+        self._select_after_split(kept, index, drop={id(track)})
 
     def _split_stem_in_half(self, index: int, local_start: float = 0.0, local_duration: float = -1.0) -> None:
         """Cut the block under the scissor in half, on the same row, in place.
@@ -3350,6 +3568,7 @@ class MainWindow(QMainWindow):
         if mid - region_start <= 0.05 or region_end - mid <= 0.05:
             self.statusBar().showMessage("This stem is too short to split in half", 3000)
             return
+        kept = self._selection_by_track()
         self._remember_edit()
         name = track.get("name", "Track")
 
@@ -3391,7 +3610,9 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(next(i for i, other in enumerate(self.project.tracks) if other is left))
+        self._select_after_split(
+            kept, next(i for i, other in enumerate(self.project.tracks) if other is left), drop={id(track)}
+        )
         self.statusBar().showMessage(f"Split “{name}” into two tracks", 2000)
 
     def _duplicate_selected(self) -> None:
@@ -4114,49 +4335,164 @@ class MainWindow(QMainWindow):
         return int(track), int(bar)
 
     def _toggle_block(self, track: int, bar: int) -> None:
-        picks = self._view_for(track).picks()
-        if bar in picks.get(track, ()) and sum(len(bars) for bars in picks.values()) > 1:
-            # ▶ on a picked block plays (or pauses) the whole selection.
-            keys = {self._voice_key(index, other) for index, bars in picks.items() for other in bars}
-            states = self.engine.previews()
-            if any(states.get(key, (False,))[0] for key in keys):
-                for key in keys:
-                    self.engine.preview_pause(key)
-                self._sync_previews()
-            else:
-                self._stop_blocks()  # exactly the picks: nothing else plays on
-                self._play_picked_blocks()
+        """▶ / ⏸ on a block. On one of several selected blocks it plays the
+        whole selection combined, as one loop; on any other block it plays
+        just that block."""
+        chosen_blocks = self._selected_blocks()
+        if (track, bar) in chosen_blocks and len(chosen_blocks) > 1:
+            self._toggle_combined_loop(chosen_blocks)
             return
-        selected = sorted({index for view in self._timelines() for index in view.selected_indices()})
-        if track in selected and len(selected) > 1:
-            # ▶ (or Shift+▶) on one of several selected tracks (Shift+click):
-            # that bar's time loops on every selected track together. A ▶
-            # on a track that is not selected plays only that track.
-            times = self._view_for(track).block_times(track, bar)
-            if times is not None:
-                middle = (times[0] + times[1]) / 2.0
-                keys = []
-                for index in selected:
-                    other = bar if index == track else self._view_for(index).block_at_time(index, middle)
-                    if other is not None:
-                        keys.append((index, other))
-                voices = {self._voice_key(index, other) for index, other in keys}
-                states = self.engine.previews()
-                if states.get(self._voice_key(track, bar), (False,))[0]:
-                    for voice in voices:
-                        self.engine.preview_pause(voice)
-                    self._sync_previews()
-                else:
-                    self._stop_blocks()  # exactly the selection
-                    self._start_blocks(keys)
-                return
         key = self._voice_key(track, bar)
-        state = self.engine.previews().get(key)
+        states = self.engine.previews()
+        state = states.get(key)
+        chosen = id(self.project.tracks[track]) in self._chosen_tracks()
         if state is not None and state[0]:
-            self.engine.preview_pause(key)
+            if chosen:
+                self._pause_selected()  # the selected tracks pause together
+            else:
+                self.engine.preview_pause(key)  # an unselected track: just this one
+                self._sync_previews()
+            return
+        if state is not None:
+            # Selected tracks paused together play on together, in sync. An
+            # unselected track plays on alone and starts nothing else.
+            paused = [key]
+            if chosen:
+                paused = [
+                    other for other, (playing, _seconds) in states.items()
+                    if not playing and self._key_chosen(other)
+                ]
+            try:
+                self.engine.preview_resume(paused)
+            except Exception as exc:
+                QMessageBox.critical(self, "Audio output error", f"Could not play the block.\n\n{exc}")
             self._sync_previews()
+            if not self.frame_timer.isActive():
+                self.frame_timer.start()
             return
         self._start_blocks([(track, bar)])
+
+    def _selected_blocks(self) -> list[tuple[int, int]]:
+        """Every selected block, ``(track, bar)``: the picked blocks, and all
+        the blocks of a track that is selected as a whole."""
+        found = []
+        for view in self._timelines():
+            picks = view.picks()
+            for index, bars in picks.items():
+                found.extend((index, bar) for bar in sorted(bars))
+            for index in view.selected_indices():
+                if index in picks:
+                    continue
+                clip = view._clip_for(index)
+                if clip is not None:
+                    found.extend((index, int(span[0])) for span in view._spans_of(clip))
+        return sorted(set(found))
+
+    def _toggle_combined_loop(self, blocks) -> None:
+        """The selected blocks as one track: they loop together, each at its
+        own place in time, from the first one's start to the last one's end.
+        ⏸ pauses them all; ▶ plays them on from there, still in step."""
+        keys = list(blocks)
+        states = self.engine.previews()
+        if any(states.get(key, (False,))[0] for key in keys):
+            # The loop pauses as one; blocks outside the selection play on.
+            for key in keys:
+                if states.get(key, (False,))[0]:
+                    self.engine.preview_pause(key)
+            if self.engine.playing:
+                self._pause()
+            self._sync_previews()
+            return
+        paused = [key for key in keys if key in states]
+        try:
+            if paused and len(paused) == len(keys):
+                self.engine.preview_resume(paused)
+            else:
+                self._stop_unselected(self._chosen_tracks())  # start the loop afresh
+                entries = []
+                rows = {}
+                for index, bar in keys:
+                    view = self._view_for(index)
+                    times = view.block_times(index, bar)
+                    if times is None:
+                        continue
+                    if view not in rows:
+                        rows[view] = view.lane_rows(self.project.tracks)[0]
+                    row = (view.canvas, rows[view][index])  # tracks sharing a row are one row
+                    entries.append(((index, bar), index, times[0], times[1], row))
+                    self._preview_tracks[(index, bar)] = (self.project.tracks[index], times)
+                self.engine.preview_loop(entries)
+                count = len({entry[4] for entry in entries})
+                self.statusBar().showMessage(
+                    f"Looping {count} selected track{'s' if count != 1 else ''} together, all from the same moment", 4000
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output error", f"Could not play the blocks.\n\n{exc}")
+        self.stem_splitter.stop_preview()
+        self._sync_previews()
+        if not self.frame_timer.isActive():
+            self.frame_timer.start()
+
+    def _chosen_tracks(self) -> set[int]:
+        """The selected tracks (picked blocks or selected clips), by identity."""
+        tracks = self.project.tracks
+        indices = set()
+        for view in self._timelines():
+            indices.update(view.picks())
+            indices.update(view.selected_indices())
+        return {id(tracks[index]) for index in indices if 0 <= index < len(tracks)}
+
+    def _key_chosen(self, key) -> bool:
+        tracks = self.project.tracks
+        return 0 <= key[0] < len(tracks) and id(tracks[key[0]]) in self._chosen_tracks()
+
+    def _pause_selected(self) -> None:
+        """Pausing one selected track pauses every selected track (and the
+        song if it plays). Unselected tracks keep playing."""
+        chosen = self._chosen_tracks()
+        tracks = self.project.tracks
+        for key, (playing, _seconds) in self.engine.previews().items():
+            if playing and 0 <= key[0] < len(tracks) and id(tracks[key[0]]) in chosen:
+                self.engine.preview_pause(key)
+        if self.engine.playing:
+            self._pause()
+        self._sync_previews()
+        self.statusBar().showMessage("Paused the selected tracks. ▶ plays them on", 2500)
+
+    def _canvas_input(self, starting: bool) -> None:
+        """Around each mouse press or release on a canvas: a track the user
+        just unselected stops playing at once."""
+        if starting:
+            if self._input_depth == 0:
+                self._chosen_at_input = self._chosen_tracks()
+            self._input_depth += 1
+            return
+        self._input_depth = max(0, self._input_depth - 1)
+        if self._input_depth == 0:
+            self._stop_unselected(self._chosen_at_input - self._chosen_tracks())
+
+    def _stop_unselected(self, gone: set[int]) -> None:
+        if not gone:
+            return
+        tracks = self.project.tracks
+        stopped = False
+        for key in list(self.engine.previews()):
+            if 0 <= key[0] < len(tracks) and id(tracks[key[0]]) in gone:
+                self.engine.preview_stop(key)
+                stopped = True
+        if stopped:
+            self._sync_previews()
+
+    def _pause_everything(self) -> None:
+        """Pausing one track pauses every track: each playing block and the
+        song. Each keeps its place, so ▶ plays them on in sync."""
+        for key, (playing, _seconds) in self.engine.previews().items():
+            if playing:
+                self.engine.preview_pause(key)
+        if self.engine.playing:
+            self._pause()
+        self._sync_previews()
+        self.statusBar().showMessage("Paused everything. ▶ plays it on", 2500)
 
     def _is_split_piece(self, index: int) -> bool:
         """True when this clip is one piece of a stem that was cut in two.

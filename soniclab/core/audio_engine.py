@@ -38,7 +38,7 @@ class _Voice:
     of its track.
     """
 
-    __slots__ = ("key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length")
+    __slots__ = ("key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "cycle")
 
     def __init__(self, key, clip: int, start: int, end: int, group=None):
         self.key = key
@@ -51,6 +51,12 @@ class _Voice:
         self.muted = False
         self.shift = 0
         self.length = None
+        # A block of a combined loop. ``cycle`` is (0, longest row): the one
+        # timer every row shares, which wraps for all of them together. Its
+        # row's part is ``length`` frames and repeats inside the cycle with
+        # no gap when shorter; the block sounds inside its own [start, end)
+        # of that part. ``shift`` turns row time into its arrangement place.
+        self.cycle = None
 
 
 class _Group:
@@ -557,6 +563,10 @@ class AudioEngine:
                 if voice.muted:
                     continue
                 peak = self._mix_stem(outdata, clip, clip["start"] - offset + voice.shift, group, _own_length(voice, group.loop))
+            elif voice.cycle is not None:
+                if not voice.playing:
+                    continue
+                peak = self._mix_cycle(outdata, frames, clip, voice)
             else:
                 if not voice.playing:
                     continue
@@ -689,6 +699,73 @@ class AudioEngine:
         if target < 1.0 or previous < 1.0:
             outdata[:frames] *= gain[:, None]
 
+    @staticmethod
+    def _mix_cycle(outdata, frames: int, clip, voice) -> float:
+        """One block of a combined loop: walk the shared cycle, wrapping at
+        its end, and add the clip only inside the voice's own block."""
+        first, last = voice.cycle
+        own = voice.length or (last - first)
+        cursor = voice.cursor
+        filled = 0
+        peak = 0.0
+        while filled < frames:
+            if cursor >= last:
+                cursor = first
+            local = (cursor - first) % own  # where its row's part is now
+            span = min(frames - filled, last - cursor, own - local)
+            low = max(local, voice.start)
+            high = min(local + span, voice.end)
+            if high > low:
+                at = filled + (low - local)
+                peak = max(peak, mix_clip_into(outdata[at : at + (high - low)], clip, low + voice.shift))
+            cursor += span
+            filled += span
+        voice.cursor = cursor
+        return peak
+
+    def preview_loop(self, blocks) -> None:
+        """Play blocks as one combined loop on one shared clock.
+
+        ``blocks`` is a list of ``(key, clip index, start, end, row)``, with
+        start and end in arrangement seconds. Every row starts at the same
+        moment: a row's blocks play one after another, with the empty time
+        between them left out. The loop is as long as the longest row, on
+        one timer for all: a shorter row repeats inside it with no gap, and
+        every row starts again together at the top of each loop, so they
+        never drift. Voices already under these keys are replaced. Raises if
+        the audio output cannot start.
+        """
+        rows: dict = {}
+        for key, clip, start, end, row in blocks:
+            first = max(0, int(round(float(start) * OUTPUT_RATE)))
+            last = int(round(float(end) * OUTPUT_RATE))
+            if last > first:
+                rows.setdefault(row, []).append((first, last, key, clip))
+        if not rows:
+            return
+        placed = []  # (key, clip, row start, row end, shift, row length)
+        for members in rows.values():
+            # A row's blocks one after another, the gaps between them dropped.
+            members.sort()
+            cursor = 0
+            laid = []
+            for first, last, key, clip in members:
+                laid.append((key, clip, cursor, cursor + (last - first), first - cursor))
+                cursor += last - first
+            length = cursor
+            placed.extend((key, clip, a, b, shift, length) for key, clip, a, b, shift in laid)
+        cycle = (0, max(item[5] for item in placed))  # one timer: the longest row
+        with self._lock:
+            for key, clip, a, b, shift, length in placed:
+                voice = _Voice(key, clip, a, b)
+                voice.shift = shift
+                voice.length = length
+                voice.cycle = cycle
+                voice.cursor = 0
+                self._voices[key] = voice
+            self._publish_previews()
+        self._ensure_stream()
+
     def _publish_previews(self, sounds_at: float | None = None) -> None:
         when = time.monotonic() if sounds_at is None else sounds_at
         clips = self._clips
@@ -696,7 +773,11 @@ class AudioEngine:
         view = {}
         for key, voice in self._voices.items():
             if voice.group is None:
-                view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, 0, when, None, None)
+                if voice.cycle is not None:
+                    own = voice.length or None
+                    view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, voice.shift, when, voice.cycle, own)
+                else:
+                    view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, 0, when, None, None)
                 continue
             group = groups.get(voice.group)
             if group is None or not (0 <= voice.clip < len(clips)):
@@ -858,6 +939,16 @@ class AudioEngine:
                 frame += loop[1] - loop[0]
             frame = _wrap(frame, loop)
         return frame / OUTPUT_RATE
+
+    def preview_resume(self, keys) -> None:
+        """Play paused voices on from where each one stopped, together."""
+        with self._lock:
+            for key in keys:
+                voice = self._voices.get(key)
+                if voice is not None:
+                    voice.playing = True
+            self._publish_previews()
+        self._ensure_stream()
 
     def preview_pause(self, key) -> None:
         with self._lock:

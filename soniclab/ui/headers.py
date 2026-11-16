@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, Signal, QEvent, QSize
+from PySide6.QtCore import QPoint, Qt, Signal, QEvent, QSize
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
@@ -26,6 +26,8 @@ class TrackHeader(QFrame):
     arm_changed = Signal(int, bool)
     edit_finished = Signal()
     rename_requested = Signal(int)
+    # Right-click: the track menu, at this global position.
+    menu_requested = Signal(int, QPoint)
 
     def __init__(self, index: int, track: dict, height: int):
         super().__init__()
@@ -37,6 +39,10 @@ class TrackHeader(QFrame):
         self._drag_h = height
         self.setObjectName("trackHeader")
         self.setFixedHeight(height)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.menu_requested.emit(self.index, self.mapToGlobal(pos))
+        )
         self.setProperty("selected", False)
 
         root = QHBoxLayout(self)
@@ -228,6 +234,7 @@ class HeaderColumn(QWidget):
     arm_changed = Signal(int, bool)
     edit_finished = Signal()
     rename_requested = Signal(int)
+    menu_requested = Signal(int, QPoint)
     # The ▶ in the corner: play (or stop) this canvas on its own.
     play_requested = Signal()
 
@@ -308,6 +315,7 @@ class HeaderColumn(QWidget):
         header.arm_changed.connect(self.arm_changed)
         header.edit_finished.connect(self.edit_finished)
         header.rename_requested.connect(self.rename_requested)
+        header.menu_requested.connect(self.menu_requested)
         return header
 
     def _build_corner(self) -> QFrame:
