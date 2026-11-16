@@ -51,11 +51,11 @@ class _Voice:
         self.muted = False
         self.shift = 0
         self.length = None
-        # A block of a combined loop. ``cycle`` is (0, longest row): the one
-        # timer every row shares, which wraps for all of them together. Its
-        # row's part is ``length`` frames and repeats inside the cycle with
-        # no gap when shorter; the block sounds inside its own [start, end)
-        # of that part. ``shift`` turns row time into its arrangement place.
+        # A block of a combined loop. ``cycle`` is (0, its row's length):
+        # each row loops on its own length, never cut short by a longer
+        # one, and every row follows the shared clock (``_master``), so they
+        # stay in time. The block sounds inside its own [start, end) of the
+        # row. ``shift`` turns row time into its arrangement place.
         self.cycle = None
 
 
@@ -237,6 +237,11 @@ class AudioEngine:
         # cursor, sounds at), swapped in whole like ``_preview_view``.
         self._groups: dict = {}
         self._group_view: dict = {}
+        # The one clock every block loop shares: frames since the first of
+        # the voices now playing started. It moves on while any plays and
+        # holds while none does. A loop started (or resumed) while others
+        # play joins it at its phase, so every loop keeps the same time.
+        self._master = 0
         self._limit_gain = 1.0
 
     @property
@@ -542,6 +547,8 @@ class AudioEngine:
         for group in groups.values():
             group.running = False
             group.plan(frames)
+        if any(voice.playing for voice in self._voices.values()):
+            self._master += frames
         for key, voice in self._voices.items():
             if not (0 <= voice.clip < len(clips)):
                 finished.append(key)
@@ -682,6 +689,22 @@ class AudioEngine:
         for key in [key for key in self._groups if key not in used]:
             del self._groups[key]
 
+    def _sharing(self, starting=()) -> bool:
+        """Whether voices other than ``starting`` play now, so what starts
+        joins the shared clock. With none playing it restarts from zero:
+        what starts now sets the time."""
+        if any(voice.playing for key, voice in self._voices.items() if key not in starting):
+            return True
+        self._master = 0
+        return False
+
+    def _join_group(self, group) -> None:
+        """Put a looping group's clock on the shared clock's phase."""
+        if group.loop is not None:
+            first, last = group.loop
+            group.cursor = group.next_cursor = first + self._master % (last - first)
+            group.fading = group.next_fading = False
+
     def _limit(self, outdata, frames: int) -> None:
         """Peak limiter for stacked preview voices: instant attack, smooth
         release, so several loud stems together do not hard-clip."""
@@ -729,11 +752,13 @@ class AudioEngine:
         ``blocks`` is a list of ``(key, clip index, start, end, row)``, with
         start and end in arrangement seconds. Every row starts at the same
         moment: a row's blocks play one after another, with the empty time
-        between them left out. The loop is as long as the longest row, on
-        one timer for all: a shorter row repeats inside it with no gap, and
-        every row starts again together at the top of each loop, so they
-        never drift. Voices already under these keys are replaced. Raises if
-        the audio output cannot start.
+        between them left out. Each row loops on its own length with no gap,
+        and is never cut or restarted when a longer row ends. Every row
+        reads the shared clock, so rows stay in time and meet again where
+        their lengths do. Voices already under these keys are replaced; if
+        any of them were playing, the loop goes on from where the clock is
+        (adding a track does not restart the others). Raises if the audio
+        output cannot start.
         """
         rows: dict = {}
         for key, clip, start, end, row in blocks:
@@ -754,14 +779,19 @@ class AudioEngine:
                 cursor += last - first
             length = cursor
             placed.extend((key, clip, a, b, shift, length) for key, clip, a, b, shift in laid)
-        cycle = (0, max(item[5] for item in placed))  # one timer: the longest row
         with self._lock:
+            keys = {item[0] for item in placed}
+            going = any(self._voices[key].playing for key in keys if key in self._voices)
+            # Joining loops already playing (or this loop growing while it
+            # plays): each row starts at the shared clock's place in it.
+            if not going:
+                self._sharing(keys)  # with nothing else playing, the clock starts at zero
             for key, clip, a, b, shift, length in placed:
                 voice = _Voice(key, clip, a, b)
                 voice.shift = shift
                 voice.length = length
-                voice.cycle = cycle
-                voice.cursor = 0
+                voice.cycle = (0, length)
+                voice.cursor = self._master % length
                 self._voices[key] = voice
             self._publish_previews()
         self._ensure_stream()
@@ -874,6 +904,8 @@ class AudioEngine:
                 if frames is not None:
                     first = frames[0]
                 self._groups[group] = _Group(group, first, frames)
+                if self._sharing({member[0] for member in members}):
+                    self._join_group(self._groups[group])
             elif loop is not None:
                 self._groups[group].loop = frames
             for member in members:
@@ -943,10 +975,20 @@ class AudioEngine:
     def preview_resume(self, keys) -> None:
         """Play paused voices on from where each one stopped, together."""
         with self._lock:
+            keys = [key for key in keys if key in self._voices]
+            # Back on the shared clock, which held while nothing played:
+            # loops resume at its phase, so a loop paused earlier than the
+            # rest comes back in time with them.
+            idle = {voice.group for voice in self._voices.values() if voice.group is not None}
+            idle -= {voice.group for voice in self._voices.values() if voice.group is not None and voice.playing}
             for key in keys:
-                voice = self._voices.get(key)
-                if voice is not None:
-                    voice.playing = True
+                voice = self._voices[key]
+                if voice.cycle is not None:
+                    voice.cursor = self._master % voice.cycle[1]
+                elif voice.group in idle and voice.group in self._groups:
+                    self._join_group(self._groups[voice.group])
+            for key in keys:
+                self._voices[key].playing = True
             self._publish_previews()
         self._ensure_stream()
 
@@ -1000,11 +1042,28 @@ class AudioEngine:
         A stem voice's seconds are in arrangement time on its own clip.
         A finished or stopped voice is absent.
         """
+        return {key: (playing, seconds) for key, playing, seconds, _inside in self._heard_previews(now)}
+
+    def sounding_time(self, now: float | None = None) -> float | None:
+        """Arrangement seconds heard now from the block voices, or None when
+        none plays. Taken from a voice whose own block is sounding: in a
+        combined loop each block holds its time while its row plays another
+        block, so that one would stand still. Lock-free."""
+        heard = sorted(
+            (not inside, key, seconds)
+            for key, playing, seconds, inside in self._heard_previews(now)
+            if playing
+        )
+        return heard[0][2] if heard else None
+
+    def _heard_previews(self, now: float | None = None):
+        """``(key, playing, seconds, inside)`` per voice; ``inside`` is
+        whether the heard frame is within the voice's own block."""
         view = self._preview_view
         if not view:
-            return {}
+            return []
         now = time.monotonic() if now is None else float(now)
-        shown = {}
+        shown = []
         for key, (playing, moving, start, end, cursor, base, sounds_at, loop, own) in view.items():
             frame = cursor
             if moving:
@@ -1016,7 +1075,8 @@ class AudioEngine:
                 frame = _wrap(frame, loop)
                 if own is not None:
                     frame = loop[0] + (frame - loop[0]) % own  # inside its own block
-            shown[key] = (playing, (base + min(end, max(start, frame))) / OUTPUT_RATE)
+            inside = start <= frame < end
+            shown.append((key, playing, (base + min(end, max(start, frame))) / OUTPUT_RATE, inside))
         return shown
 
     def _ensure_stream(self) -> None:

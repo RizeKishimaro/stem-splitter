@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSlider, QToolButt
 
 from soniclab.core.audio_engine import OUTPUT_RATE
 from soniclab.core.dancer import (
+    ASSETS,
     BLOCK_PX,
     FRAME_PX,
     SHEET_COLUMNS,
@@ -21,6 +22,15 @@ from soniclab.core.dancer import (
     pose_at,
 )
 from soniclab.core.sprite_project import SpriteProject, display_source
+
+# The characters the dancer can be. Heart is the built-in sheet; the
+# others are sprite projects in the assets folder, on the same clock.
+CHARACTERS = (
+    ("Heart", ""),
+    ("Green dancer", "green_dancer/green_dancer.sprite.json"),
+    ("Walker", "walker/walker.sprite.json"),
+)
+EDITOR_CHARACTER = "Sprite editor"
 
 _SHEET: QImage | None = None
 _SHEET_FAILED = False
@@ -85,6 +95,12 @@ class DancerView(QWidget):
         self.heart_btn.setToolTip("Show the heart dancer.")
         self.heart_btn.clicked.connect(self.restore_heart)
         row.addWidget(self.heart_btn)
+        self.character_box = QComboBox()
+        for name, path in CHARACTERS:
+            self.character_box.addItem(name, path)
+        self.character_box.setToolTip("Which character dances. Every one follows the same beat and downbeats.")
+        self.character_box.currentIndexChanged.connect(self._character_changed)
+        row.addWidget(self.character_box)
         self.sensitivity = QSlider(Qt.Orientation.Horizontal)
         self.sensitivity.setRange(40, 250)
         self.sensitivity.setValue(100)
@@ -203,6 +219,7 @@ class DancerView(QWidget):
         self._sprite_project = None
         self._project_image = None
         self._pose = Pose(-1, -1.0, False)
+        self._show_character("Heart")
         self._tick()
 
     def apply_sprite_project(self, data: dict | None) -> None:
@@ -210,12 +227,55 @@ class DancerView(QWidget):
         if not data:
             self._sprite_project = None
             self._project_image = None
+            self._show_character("Heart")
             return
         root = str(data.get("_root", "") or "")
-        self._sprite_project = SpriteProject.from_dict(data, root=root)
+        self._use_project(SpriteProject.from_dict(data, root=root))
+        self._show_character(EDITOR_CHARACTER)
+
+    @property
+    def character(self) -> str:
+        return self.character_box.currentText()
+
+    def select_character(self, name: str) -> bool:
+        """Dance as one of ``CHARACTERS``. Returns False for an unknown name."""
+        index = self.character_box.findText(name)
+        if index < 0:
+            return False
+        self.character_box.setCurrentIndex(index)
+        return True
+
+    def _character_changed(self, index: int) -> None:
+        path = str(self.character_box.itemData(index) or "")
+        name = self.character_box.itemText(index)
+        if name == EDITOR_CHARACTER:
+            return
+        if not path:
+            self.restore_heart()
+            return
+        try:
+            project = SpriteProject.load(ASSETS / path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.caption.setText(f"Could not load {name}: {exc}")
+            return
+        self._use_project(project)
+
+    def _use_project(self, project: SpriteProject) -> None:
+        self._sprite_project = project
         self._project_image = None
         self._pose = Pose(-1, -1.0, False)
         self._tick()
+        self.stage.update()
+
+    def _show_character(self, name: str) -> None:
+        """Show ``name`` in the picker without loading it again."""
+        index = self.character_box.findText(name)
+        if index < 0:
+            self.character_box.addItem(name, "")
+            index = self.character_box.count() - 1
+        self.character_box.blockSignals(True)
+        self.character_box.setCurrentIndex(index)
+        self.character_box.blockSignals(False)
 
     def live_events(self) -> list[dict]:
         return [

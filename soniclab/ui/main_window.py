@@ -3740,11 +3740,24 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Dancer is using the sprite animation", 4000)
 
     def _dancer_clock(self):
-        """Playback position, tempo, downbeats and loop. Not a wall clock."""
-        playing = bool(self.engine.playing)
-        seconds = self.engine.heard_position() if playing else float(self.engine.position)
+        """Playback position, tempo, downbeats and loop. Not a wall clock.
+
+        With the song stopped and stems or blocks playing on their own, the
+        dancer follows them: the arrangement time a playing block is heard
+        at, which lines up with the song's downbeats."""
         bpm = float(self.project.bpm or 120.0)
+        playing = bool(self.engine.playing)
+        if not playing:
+            heard = self._dancer_preview_time()
+            if heard is not None:
+                return heard, bpm, self._dancer_downbeats(), None, True
+        seconds = self.engine.heard_position() if playing else float(self.engine.position)
         return seconds, bpm, self._dancer_downbeats(), self.engine.loop, playing
+
+    def _dancer_preview_time(self) -> float | None:
+        """Arrangement seconds heard from the playing block voices, or None.
+        Stems of a split share one clock, so any sounding one gives the same."""
+        return self.engine.sounding_time()
 
     def _dancer_audio(self):
         """Latest master block and the arrangement time of its first sample.
@@ -3754,7 +3767,12 @@ class MainWindow(QMainWindow):
         """
         audio = self.engine.read_master(2048)
         count = int(audio.shape[0]) if getattr(audio, "ndim", 0) else 0
-        origin = float(self.engine.position) - count / OUTPUT_RATE
+        end = float(self.engine.position)
+        if not self.engine.playing:
+            heard = self._dancer_preview_time()
+            if heard is not None:
+                end = heard
+        origin = end - count / OUTPUT_RATE
         return audio, origin
 
     def _dancer_downbeats(self) -> tuple[float, ...]:
@@ -4394,21 +4412,27 @@ class MainWindow(QMainWindow):
         ⏸ pauses them all; ▶ plays them on from there, still in step."""
         keys = list(blocks)
         states = self.engine.previews()
-        if any(states.get(key, (False,))[0] for key in keys):
+        if all(states.get(key, (False,))[0] for key in keys):
             # The loop pauses as one; blocks outside the selection play on.
             for key in keys:
-                if states.get(key, (False,))[0]:
-                    self.engine.preview_pause(key)
+                self.engine.preview_pause(key)
             if self.engine.playing:
                 self._pause()
             self._sync_previews()
             return
         paused = [key for key in keys if key in states]
         try:
-            if paused and len(paused) == len(keys):
+            if paused and len(paused) == len(keys) and not any(states[key][0] for key in keys):
                 self.engine.preview_resume(paused)
             else:
-                self._stop_unselected(self._chosen_tracks())  # start the loop afresh
+                # Build the loop with every selected block. Blocks already
+                # playing in it go on where they are; a new one joins in time.
+                wanted = set(keys)
+                tracks = self.project.tracks
+                chosen = self._chosen_tracks()
+                for key in list(self.engine.previews()):
+                    if key not in wanted and 0 <= key[0] < len(tracks) and id(tracks[key[0]]) in chosen:
+                        self.engine.preview_stop(key)
                 entries = []
                 rows = {}
                 for index, bar in keys:

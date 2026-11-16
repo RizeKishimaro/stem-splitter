@@ -181,11 +181,31 @@ def phrase_beat(
     else:
         origin = marks[index]
         bar_len = _bar_length(marks, index, bpm)
-    into = min(0.9999, max(0.0, (seconds - origin) / bar_len))
-    bar_in_phrase = index % 2
+        typical = _typical_bar(marks, bpm)
+        if index + 1 < len(marks) and bar_len > 1.6 * typical:
+            # Downbeats were missed here (a break, or the drum track is cut):
+            # the gap holds several bars, not one slow one.
+            bar_len /= max(1, round(bar_len / typical))
+        elif index + 1 >= len(marks):
+            bar_len = typical  # past the last downbeat: bars go on
+    # Bars keep counting past ``bar_len`` until the next downbeat, so the
+    # dance never stops between downbeats that are far apart.
+    elapsed = max(0.0, (seconds - origin) / bar_len)
+    bars = int(elapsed)
+    into = min(0.9999, elapsed - bars)
+    bar_in_phrase = (index + bars) % 2
     if bar_in_phrase < 0:
         bar_in_phrase += 2
     return (bar_in_phrase * BEATS_PER_BAR + into * BEATS_PER_BAR) % PHRASE_BEATS
+
+
+def _typical_bar(marks: tuple[float, ...], bpm: float) -> float:
+    """The usual gap between downbeats (their median), or a bar at ``bpm``."""
+    gaps = [b - a for a, b in zip(marks, marks[1:]) if b - a > 1e-4]
+    if not gaps:
+        return BEATS_PER_BAR * 60.0 / max(float(bpm), 1.0)
+    gaps.sort()
+    return gaps[len(gaps) // 2]
 
 
 def _latest_at_or_before(marks: tuple[float, ...], seconds: float) -> int:

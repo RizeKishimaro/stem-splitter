@@ -2678,7 +2678,8 @@ class TimelineView(QGraphicsView):
             button = self._keep(CombinedPlayButton(self))
             self.scene_obj.addItem(button)
             self._combined_buttons.append(button)
-        playing = any(self._combined_states.get(block, (False,))[0] for block in blocks)
+        # ⏸ only while every selected block plays: with one added, ▶ adds it.
+        playing = bool(blocks) and all(self._combined_states.get(block, (False,))[0] for block in blocks)
         for index, button in enumerate(self._combined_buttons):
             if index >= len(spots):
                 button.setVisible(False)
@@ -2743,7 +2744,8 @@ class TimelineView(QGraphicsView):
         self._combined_states = dict(states)
         shown = [button for button in self._combined_buttons if isValid(button) and button.isVisible()]
         if shown:
-            playing = any(states.get(block, (False,))[0] for block in self.selected_blocks())
+            chosen = self.selected_blocks()
+            playing = bool(chosen) and all(states.get(block, (False,))[0] for block in chosen)
             for button in shown:
                 button.set_playing(playing)
 

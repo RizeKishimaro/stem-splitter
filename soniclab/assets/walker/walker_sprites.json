@@ -1,0 +1,247 @@
+{
+  "format": "soniclab.sprite-map",
+  "version": 1,
+  "character": "walker",
+  "source": "walker_sheet.png",
+  "image": {
+    "width": 1474,
+    "height": 2000
+  },
+  "grid": {
+    "columns": 4,
+    "rows": 4,
+    "cell_width": 368,
+    "cell_height": 500,
+    "pitch_x": 368.5,
+    "pitch_y": 500,
+    "frames": 15,
+    "note": "Cells are 368.5 wide; each rect starts at the cell edge rounded down. The last cell is empty."
+  },
+  "frames": {
+    "frame_000": {
+      "rect": [
+        0,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        30,
+        52,
+        305,
+        435
+      ],
+      "sheet_index": 0
+    },
+    "frame_001": {
+      "rect": [
+        368,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        402,
+        73,
+        303,
+        412
+      ],
+      "sheet_index": 1
+    },
+    "frame_002": {
+      "rect": [
+        737,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        778,
+        44,
+        276,
+        437
+      ],
+      "sheet_index": 2
+    },
+    "frame_003": {
+      "rect": [
+        1105,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        1140,
+        10,
+        230,
+        475
+      ],
+      "sheet_index": 3
+    },
+    "frame_004": {
+      "rect": [
+        0,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        31,
+        506,
+        235,
+        480
+      ],
+      "sheet_index": 4
+    },
+    "frame_005": {
+      "rect": [
+        368,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        406,
+        512,
+        250,
+        473
+      ],
+      "sheet_index": 5
+    },
+    "frame_006": {
+      "rect": [
+        737,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        760,
+        524,
+        318,
+        460
+      ],
+      "sheet_index": 6
+    },
+    "frame_007": {
+      "rect": [
+        1105,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        1108,
+        530,
+        365,
+        458
+      ],
+      "sheet_index": 7
+    },
+    "frame_008": {
+      "rect": [
+        0,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        27,
+        1046,
+        327,
+        442
+      ],
+      "sheet_index": 8
+    },
+    "frame_009": {
+      "rect": [
+        368,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        416,
+        1063,
+        298,
+        425
+      ],
+      "sheet_index": 9
+    },
+    "frame_010": {
+      "rect": [
+        737,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        773,
+        1005,
+        261,
+        486
+      ],
+      "sheet_index": 10
+    },
+    "frame_011": {
+      "rect": [
+        1105,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        1149,
+        1014,
+        219,
+        468
+      ],
+      "sheet_index": 11
+    },
+    "frame_012": {
+      "rect": [
+        0,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        46,
+        1521,
+        227,
+        464
+      ],
+      "sheet_index": 12
+    },
+    "frame_013": {
+      "rect": [
+        368,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        410,
+        1529,
+        311,
+        456
+      ],
+      "sheet_index": 13
+    },
+    "frame_014": {
+      "rect": [
+        737,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        767,
+        1531,
+        318,
+        452
+      ],
+      "sheet_index": 14
+    }
+  }
+}

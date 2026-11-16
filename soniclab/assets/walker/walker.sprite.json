@@ -1,0 +1,567 @@
+{
+  "format": "soniclab.sprite",
+  "version": 1,
+  "name": "walker",
+  "bpm": 125.0,
+  "spritesheet": {
+    "file": "walker_sheet.png",
+    "frame_width": 368,
+    "frame_height": 500,
+    "columns": 4,
+    "rows": 4,
+    "spacing_x": 0,
+    "spacing_y": 0,
+    "margin_x": 0,
+    "margin_y": 0,
+    "image_width": 1474,
+    "image_height": 2000
+  },
+  "frames": [
+    {
+      "id": 0,
+      "name": "000",
+      "source": 0,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        0,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        30,
+        52,
+        305,
+        435
+      ]
+    },
+    {
+      "id": 1,
+      "name": "001",
+      "source": 1,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        368,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        402,
+        73,
+        303,
+        412
+      ]
+    },
+    {
+      "id": 2,
+      "name": "002",
+      "source": 2,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        737,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        778,
+        44,
+        276,
+        437
+      ]
+    },
+    {
+      "id": 3,
+      "name": "003",
+      "source": 3,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        1105,
+        0,
+        368,
+        500
+      ],
+      "content_rect": [
+        1140,
+        10,
+        230,
+        475
+      ]
+    },
+    {
+      "id": 4,
+      "name": "004",
+      "source": 4,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        0,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        31,
+        506,
+        235,
+        480
+      ]
+    },
+    {
+      "id": 5,
+      "name": "005",
+      "source": 5,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        368,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        406,
+        512,
+        250,
+        473
+      ]
+    },
+    {
+      "id": 6,
+      "name": "006",
+      "source": 6,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        737,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        760,
+        524,
+        318,
+        460
+      ]
+    },
+    {
+      "id": 7,
+      "name": "007",
+      "source": 7,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        1105,
+        500,
+        368,
+        500
+      ],
+      "content_rect": [
+        1108,
+        530,
+        365,
+        458
+      ]
+    },
+    {
+      "id": 8,
+      "name": "008",
+      "source": 8,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        0,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        27,
+        1046,
+        327,
+        442
+      ]
+    },
+    {
+      "id": 9,
+      "name": "009",
+      "source": 9,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        368,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        416,
+        1063,
+        298,
+        425
+      ]
+    },
+    {
+      "id": 10,
+      "name": "010",
+      "source": 10,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        737,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        773,
+        1005,
+        261,
+        486
+      ]
+    },
+    {
+      "id": 11,
+      "name": "011",
+      "source": 11,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        1105,
+        1000,
+        368,
+        500
+      ],
+      "content_rect": [
+        1149,
+        1014,
+        219,
+        468
+      ]
+    },
+    {
+      "id": 12,
+      "name": "012",
+      "source": 12,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        0,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        46,
+        1521,
+        227,
+        464
+      ]
+    },
+    {
+      "id": 13,
+      "name": "013",
+      "source": 13,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        368,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        410,
+        1529,
+        311,
+        456
+      ]
+    },
+    {
+      "id": 14,
+      "name": "014",
+      "source": 14,
+      "category": "dance",
+      "confidence": "high",
+      "note": "The walk turns front, side, back, side, front.",
+      "rect": [
+        737,
+        1500,
+        368,
+        500
+      ],
+      "content_rect": [
+        767,
+        1531,
+        318,
+        452
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "id": "body",
+      "name": "body"
+    },
+    {
+      "id": "left_arm",
+      "name": "left arm"
+    },
+    {
+      "id": "right_arm",
+      "name": "right arm"
+    },
+    {
+      "id": "left_leg",
+      "name": "left leg"
+    },
+    {
+      "id": "right_leg",
+      "name": "right leg"
+    },
+    {
+      "id": "beat_accents",
+      "name": "beat accents"
+    },
+    {
+      "id": "instrument",
+      "name": "instrument"
+    }
+  ],
+  "instruments": {},
+  "animations": {
+    "walk": {
+      "layer": "body",
+      "frames": [
+        0,
+        0,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        5,
+        5,
+        6,
+        6,
+        7,
+        8,
+        8,
+        9,
+        10,
+        10,
+        11,
+        11,
+        12,
+        13,
+        13,
+        14,
+        0,
+        0,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        5,
+        5,
+        6,
+        6,
+        7,
+        8,
+        8,
+        9,
+        10,
+        10,
+        11,
+        11,
+        12,
+        13,
+        13,
+        14,
+        0,
+        0,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        5,
+        5,
+        6,
+        6,
+        7,
+        8,
+        8,
+        9,
+        10,
+        10,
+        11,
+        11,
+        12,
+        13,
+        13,
+        14,
+        0,
+        0,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+        5,
+        5,
+        6,
+        6,
+        7,
+        8,
+        8,
+        9,
+        10,
+        10,
+        11,
+        11,
+        12,
+        13,
+        13,
+        14
+      ],
+      "durations": [
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333,
+        0.08333333333333333
+      ],
+      "fps": 25.000000000000004,
+      "loop": "loop",
+      "base": true,
+      "speed_multiplier": 1.0,
+      "sync": {
+        "type": "downbeat",
+        "grid": "beat",
+        "beats_per_cycle": 2.0,
+        "speed_multiplier": 1.0,
+        "intensity": 1.0,
+        "sensitivity": 0.5,
+        "cooldown": 0.0
+      },
+      "note": "The 15-frame walk every two beats. Frame 0 lands on every downbeat and on beat 3."
+    }
+  }
+}
