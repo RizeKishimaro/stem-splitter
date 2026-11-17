@@ -42,19 +42,27 @@ class PausePositionEngineTests(unittest.TestCase):
         self.engine.preview_resume(["a"])
         self.assertAlmostEqual(self.engine.previews()["a"][1], held, places=3)
 
-    def test_resume_keeps_its_own_place_while_others_play(self):
-        self.engine.preview_loop([(("a", 0), 0, 0.0, 2.0, "r1"), (("b", 0), 1, 0.0, 2.0, "r2")])
+    def test_a_stem_resumes_at_its_songs_place_and_a_paused_song_holds(self):
+        song = [("a", 0, False, 0.0, 2.0), ("b", 1, False, 0.0, 2.0)]
+        self.engine.stem_play("song", song, 0.0, loop=(0.0, 2.0))
         run(self.engine, 10)
-        self.engine.preview_pause(("b", 0))
-        held = self.engine._voices[("b", 0)].cursor
-        run(self.engine, 30)  # the other row plays on
-        self.engine.preview_resume([("b", 0)])
-        self.assertEqual(self.engine._voices[("b", 0)].cursor, held)  # not moved to the other's time
-        self.assertTrue(all(state[0] for state in self.engine.previews().values()))
+        self.engine.preview_pause("b")
+        run(self.engine, 30)  # the song plays on without b
+        self.engine.preview_resume(["b"])
+        heard = self.engine.previews()
+        self.assertEqual(heard["a"], heard["b"])  # back on the song's place, not its own
+        self.engine.preview_pause("a")
+        self.engine.preview_pause("b")
+        held = self.engine._groups["song"].cursor
+        run(self.engine, 20)  # the whole song paused: its clock holds
+        self.assertEqual(self.engine._groups["song"].cursor, held)
+        self.engine.preview_resume(["a", "b"])
+        run(self.engine, 1)
+        self.assertEqual(self.engine._groups["song"].cursor, held + BLOCK)
 
     def test_stopping_everything_leaves_nothing_behind(self):
         self.engine.stem_play("g", [("s", 0)], 0.0, loop=(0.0, 1.0))
-        self.engine.preview_loop([(("l", 0), 1, 0.0, 1.0, "r")])
+        self.engine.stem_play("h", [("l", 1)], 0.0, loop=(0.0, 1.0))
         run(self.engine, 4)
         self.engine.preview_stop_all()
         self.assertEqual(self.engine.previews(), {})
@@ -156,9 +164,12 @@ class StemPlaybackWindowTests(SharedClockWindowTests):
         self.assertIn((a, stem_block(0)), self.playing())
         self.mix(20)
         self.assertEqual(self.engine.previews()[(b, stem_block(1))], held)  # holds still
-        self.press(b, 1)  # resume from there
-        self.assertAlmostEqual(self.engine.previews()[(b, stem_block(1))][1], held[1], places=3)
+        self.press(b, 1)  # resume: back on the song's clock, in step with a
+        states = self.engine.previews()
+        self.assertAlmostEqual(states[(b, stem_block(1))][1] - states[(a, stem_block(0))][1], 2.0, places=3)
         self.assertEqual(self.playing(), {(a, stem_block(0)), (b, stem_block(1))})
+        # One song, one clock: the cached stems joined the fresh split's.
+        self.assertEqual(self.engine._voices[(a, stem_block(0))].group, self.engine._voices[(b, stem_block(1))].group)
         # The canvas shows what the engine plays.
         self.window._sync_previews()
         clip = self.window._view_for(b)._clip_for(b)
@@ -187,15 +198,16 @@ class StemPlaybackWindowTests(SharedClockWindowTests):
         self.mix(10)
         self.window._deselect_all()  # the loop plays on, unselected
         voices = set(self.engine.previews())
+        drum, vocal = (self.index(drums), stem_block(0)), (self.index(vocals), stem_block(0))
         self.press(self.index(drums), 0)  # its ⏸
         self.assertEqual(set(self.engine.previews()), voices)  # no second voice
-        self.assertFalse(self.engine.previews()[(self.index(drums), 0)][0])
-        self.assertTrue(self.engine.previews()[(self.index(vocals), 0)][0])
-        held = self.engine.previews()[(self.index(drums), 0)][1]
+        self.assertFalse(self.engine.previews()[drum][0])
+        self.assertTrue(self.engine.previews()[vocal][0])
         self.mix(10)
-        self.press(self.index(drums), 0)  # ▶ again: on from where it paused
-        self.assertTrue(self.engine.previews()[(self.index(drums), 0)][0])
-        self.assertAlmostEqual(self.engine.previews()[(self.index(drums), 0)][1], held, places=3)
+        self.press(self.index(drums), 0)  # ▶ again: back in step with the song
+        states = self.engine.previews()
+        self.assertTrue(states[drum][0])
+        self.assertAlmostEqual(states[drum][1], states[vocal][1], places=3)
 
     def test_previews_clean_up_when_their_voices_end(self):
         drums, *_rest = self.split("Song")

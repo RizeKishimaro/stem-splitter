@@ -17,7 +17,7 @@ import numpy as np
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from soniclab.core.audio_engine import LIMIT_CEILING, OUTPUT_RATE, AudioEngine
-from soniclab.ui.main_window import MainWindow
+from soniclab.ui.main_window import MainWindow, stem_block
 from soniclab.ui.timeline import FOLLOW_CENTER, BarPlayButton, ClipItem, TimelineView
 
 BLOCK = 1024
@@ -189,30 +189,36 @@ class StemBlockWindowTests(unittest.TestCase):
         self.assertAlmostEqual(self.mix(), LEVELS["vocals"], places=5)
         self.press(0, 1)
         self.assertFalse(self.button(0, 1).playing)
-        self.assertEqual(self.engine.previews()[(0, 1)][0], False)  # paused, not gone
+        self.assertEqual(self.engine.previews()[(0, stem_block(1))][0], False)  # paused, not gone
         self.assertEqual(self.mix(), 0.0)
         self.press(0, 1)
         self.assertTrue(self.button(0, 1).playing)
 
     def test_resume_continues_from_the_paused_place(self):
+        key = (1, stem_block(0))
         self.press(1, 0)
         self.mix(10)
         self.press(1, 0)
-        paused_at = self.engine._voices[(1, 0)].cursor
+        group = self.engine._groups[self.engine._voices[key].group]
+        paused_at = group.cursor  # its file's clock holds where it was heard
         self.mix(5)
-        self.assertEqual(self.engine._voices[(1, 0)].cursor, paused_at)
+        self.assertEqual(group.cursor, paused_at)
         self.press(1, 0)
         self.mix(1)
-        self.assertEqual(self.engine._voices[(1, 0)].cursor, paused_at + BLOCK)
+        self.assertEqual(group.cursor, paused_at + BLOCK)
 
-    def test_the_button_resets_when_the_block_finishes(self):
+    def test_a_block_loops_until_stopped_then_the_button_resets(self):
+        # Every block, split or not, loops on its song's clock until paused
+        # or stopped; Stop resets its button and gives the playhead back.
         self.press(2, 3)
         self.assertTrue(self.button(2, 3).playing)
-        self.mix(2 * OUTPUT_RATE // BLOCK + 2)
-        self.assertNotIn((2, 3), self.engine.previews())
+        self.mix(2 * OUTPUT_RATE // BLOCK + 2)  # past the end of its 2 s
+        self.assertTrue(self.engine.previews()[(2, stem_block(3))][0])
+        self.window._stop_block_at(2, 3)
+        self.mix(2)
+        self.assertNotIn((2, stem_block(3)), self.engine.previews())
         self.assertFalse(self.button(2, 3).playing)
         self.assertTrue(self.window.timeline.playhead.isVisible())
-        self.assertFalse(self.window.frame_timer.isActive())
 
     def test_another_block_leaves_the_first_button_alone(self):
         self.press(0, 1)
@@ -243,20 +249,21 @@ class StemBlockWindowTests(unittest.TestCase):
         self.press(0, 1)  # pause vocals
         self.assertAlmostEqual(self.mix(), LEVELS["drums"] + LEVELS["bass"], places=5)
         states = self.engine.previews()
-        self.assertEqual([states[(i, 1)][0] for i in range(3)], [False, True, True])
-        self.window._stop_block((1, 1))  # stop drums
+        self.assertEqual([states[(i, stem_block(1))][0] for i in range(3)], [False, True, True])
+        self.window._stop_block((1, stem_block(1)))  # stop drums
         self.assertAlmostEqual(self.mix(), LEVELS["bass"], places=5)
         self.assertTrue(self.button(2, 1).playing)
-        self.assertNotIn((1, 1), self.engine.previews())
-        self.assertIn((0, 1), self.engine.previews())  # vocals still paused
+        self.assertNotIn((1, stem_block(1)), self.engine.previews())
+        self.assertIn((0, stem_block(1)), self.engine.previews())  # vocals still paused
 
     def test_picked_blocks_start_on_the_same_sample(self):
         self.window.timeline.set_picks({0: {2}, 1: {2}, 2: {2}})
         self.window._play_picked_blocks()
-        cursors = {voice.cursor for voice in self.engine._voices.values()}
-        self.assertEqual(cursors, {int(4.0 * OUTPUT_RATE)})
+        # Three files, three clocks (one per source), each at bar 3 of its file.
+        cursors = [group.cursor for group in self.engine._groups.values()]
+        self.assertEqual(cursors, [int(4.0 * OUTPUT_RATE)] * 3)
         self.mix(3)
-        self.assertEqual(len({voice.cursor for voice in self.engine._voices.values()}), 1)
+        self.assertEqual(len({group.cursor for group in self.engine._groups.values()}), 1)
 
     # -- apart from the transport
 

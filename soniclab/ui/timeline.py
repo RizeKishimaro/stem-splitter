@@ -82,6 +82,8 @@ RULER_HEIGHT = 32
 # Waveforms are cached as images this many pixels wide, a few per clip.
 WAVE_TILE = 1024
 WAVE_TILES_KEPT = 8
+# Waveform tile cache use across all clips, for the diagnostics report.
+TILE_STATS = {"hits": 0, "misses": 0}
 # How the canvas follows the playhead during playback.
 FOLLOW_OFF = "off"  # the canvas stays put; the playhead moves across it
 FOLLOW_PAGE = "follow"  # glide only when the playhead reaches the right edge
@@ -628,6 +630,7 @@ class ClipItem(QGraphicsRectItem):
             self._tiles.clear()
             self._tiles_key = key
         cached = self._tiles.get(tile)
+        TILE_STATS["hits" if cached is not None else "misses"] += 1
         if cached is not None:
             self._tiles.move_to_end(tile)
             return cached[1]

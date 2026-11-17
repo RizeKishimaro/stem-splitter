@@ -304,6 +304,20 @@ class SharedClockWindowTests(unittest.TestCase):
         self.window._animate_playheads()
         return mixed
 
+    def sounding_blocks(self) -> set:
+        """``(track, bar)`` of every block a playing voice plays (a run of
+        bars is one voice), from the engine's own voice states."""
+        found = set()
+        for key, (playing, _seconds) in self.engine.previews().items():
+            if not playing:
+                continue
+            entry = self.window._preview_tracks.get(key)
+            run = entry[1] if entry else None
+            first = stem_block(key[1])
+            last = run[1] if run else first
+            found.update((key[0], bar) for bar in range(first, last + 1))
+        return found
+
     def test_one_split_shares_a_group_and_another_does_not(self):
         first = self.split("One")
         second = self.split("Two")
@@ -371,26 +385,26 @@ class SharedClockWindowTests(unittest.TestCase):
         picks = {self.index(other): {1}, self.index(vocals): {1, 2}, self.index(bass): {3}}
         view.set_picks(picks)
         self.press(self.index(vocals), 2)  # ▶ on a picked block: the whole pick
-        keys = {(index, bar) for index, bars in picks.items() for bar in bars}
-        playing = {key for key, state in self.engine.previews().items() if state[0]}
-        self.assertEqual(playing, keys)
-        # Every row starts together. Vocals' two bars play back to back in a
-        # 4 s row; the one-bar rows loop their own 2 s, never cut short.
+        blocks = {(index, bar) for index, bars in picks.items() for bar in bars}
+        self.assertEqual(self.sounding_blocks(), blocks)
+        # One clock, the song's: every block starts together and plays its
+        # own stretch of the song. Vocals' two bars are one 4 s voice; the
+        # one-bar blocks loop their own 2 s, never cut short.
         voices = self.engine._voices
-        self.assertEqual(voices[(self.index(vocals), 1)].cycle, (0, 4 * OUTPUT_RATE))
-        self.assertEqual(voices[(self.index(other), 1)].cycle, (0, 2 * OUTPUT_RATE))
-        self.assertEqual({voice.cursor for voice in voices.values()}, {0})
-        blocks = 3 * OUTPUT_RATE // BLOCK
-        self.mix(blocks)
-        played = blocks * BLOCK  # about 3 s: past the end of the 2 s rows
-        self.assertEqual(voices[(self.index(other), 1)].cursor, played - 2 * OUTPUT_RATE)
-        self.assertEqual(voices[(self.index(vocals), 1)].cursor, played)
+        run = voices[(self.index(vocals), stem_block(1))]
+        one = voices[(self.index(other), stem_block(1))]
+        four = voices[(self.index(bass), stem_block(3))]
+        self.assertEqual({voice.group for voice in voices.values()}, {stem_group(drums)})
+        self.assertEqual((run.length, one.length, four.length), (4 * OUTPUT_RATE, 2 * OUTPUT_RATE, 2 * OUTPUT_RATE))
+        self.assertEqual(four.shift - one.shift, 4 * OUTPUT_RATE)  # bar 4 against bar 2 of the song
+        self.mix(3 * OUTPUT_RATE // BLOCK)
+        self.assertEqual(self.sounding_blocks(), blocks)  # past 2 s: the short ones looped
         self.assertEqual(view.picks(), picks)  # still picked
         # ▶ on any picked block again pauses the whole pick.
         self.press(self.index(other), 1)
         self.assertFalse(any(state[0] for state in self.engine.previews().values()))
 
-    def test_pieces_of_one_stem_side_by_side_play_as_one(self):
+    def test_pieces_of_one_stem_side_by_side_play_at_once(self):
         drums, bass, *_rest = self.split("Song")
         view = self.window._view_for(self.index(bass))
         view.set_picks({self.index(bass): {1, 2}})
@@ -404,22 +418,24 @@ class SharedClockWindowTests(unittest.TestCase):
         bars = [other.block_at_time(i, tracks[i]["start"] + 0.5) for i in pieces]
         self.press(pieces[1], bars[1])  # the second piece first, then its neighbour
         self.mix(5)
+        second = (pieces[1], stem_block(bars[1]))
+        before = self.engine.previews()[second][1]
         self.press(pieces[0], bars[0])
-        group = stem_group(drums)
-        self.assertEqual(self.engine._groups[group].loop, (2 * OUTPUT_RATE, 6 * OUTPUT_RATE))
-        self.assertEqual(self.engine._groups[group].cursor, 2 * OUTPUT_RATE)
-        mixed = self.mix(4 * OUTPUT_RATE // BLOCK)
-        error = lag_samples(mixed[: 4 * OUTPUT_RATE - 64], 2 * OUTPUT_RATE, (2,))
-        report("window: two pieces of one stem as one block", error)
-        self.assertLess(error, 0.25)  # bar 2 then bar 3, never both at once
-        # The last piece ends its clip: the wrap fades it out, no click.
-        around = self.mix(4)
-        steps = np.abs(np.diff(np.concatenate((mixed[-256:], around))))
-        print(f"\n  largest step where cut pieces wrap: {steps.max():.2e}", end="")
-        self.assertLess(steps.max(), 0.002)
-        # Both pieces show as playing.
+        # The neighbour joins; the piece already playing is not restarted.
+        self.assertAlmostEqual(self.engine.previews()[second][1], before, delta=0.02)
+        voices = self.engine._voices
+        first = (pieces[0], stem_block(bars[0]))
+        # Each plays its own 2 s of the file, at the same time, on one clock.
+        self.assertEqual(voices[first].length, 2 * OUTPUT_RATE)
+        self.assertEqual(voices[second].length, 2 * OUTPUT_RATE)
+        self.assertEqual(voices[second].shift - voices[first].shift, 2 * OUTPUT_RATE)
+        mixed = self.mix(2 * OUTPUT_RATE // BLOCK)
+        # Bar 2 (file 2-4 s) and bar 3 (file 4-6 s) of bass sound together.
         self.assertTrue(all(state[0] for state in self.engine.previews().values()))
         self.assertEqual(len(self.engine.previews()), 2)
+        # Silent only for the samples where both cut pieces wrap together
+        # (each fades out and in there, so the wrap does not click).
+        self.assertLess(int(np.sum(np.abs(mixed) < 1e-9)), 8)
 
     def click(self, track, bar=None, modifiers=Qt.KeyboardModifier.NoModifier):
         """A real mouse click: on that bar's ▶ of the track, or (no bar) on
@@ -455,8 +471,7 @@ class SharedClockWindowTests(unittest.TestCase):
         # The shared ▶ of the selected tracks plays them all as one loop.
         self.window._toggle_block(*view.selected_blocks()[0])
         self.assertEqual(view.selected_indices(), sorted(self.index(t) for t in (drums, other, vocals)))
-        playing = {key for key, state in self.engine.previews().items() if state[0]}
-        self.assertEqual(playing, set(view.selected_blocks()))
+        self.assertEqual(self.sounding_blocks(), set(view.selected_blocks()))
         self.window._toggle_block(*view.selected_blocks()[0])  # and pauses them together
         self.assertFalse(any(state[0] for state in self.engine.previews().values()))
         self.engine.preview_stop_all()
@@ -498,11 +513,10 @@ class SharedClockWindowTests(unittest.TestCase):
         self.click_block(self.index(bass), 3, ctrl)  # Ctrl+click again: unpicked
         self.assertEqual(view.picks(), {self.index(drums): {1}, self.index(vocals): {1, 2}})
         self.click(self.index(drums), 1)  # ▶ on one picked block plays them all as one loop
-        playing = {key for key, state in self.engine.previews().items() if state[0]}
         picked = {(self.index(drums), 1), (self.index(vocals), 1), (self.index(vocals), 2)}
-        self.assertTrue(picked <= playing)
+        self.assertTrue(picked <= self.sounding_blocks())
         # A stem that was not picked plays on, untouched.
-        self.assertIn((self.index(other), stem_block(3)), playing)
+        self.assertIn((self.index(other), 3), self.sounding_blocks())
         # Esc stops every block (paused ones too) and deselects the picked
         # blocks and any selected clips.
         self.click(self.index(other))
@@ -557,17 +571,14 @@ class SharedClockWindowTests(unittest.TestCase):
         QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                          view.mapFromScene(button.sceneBoundingRect().center()))
         self.app.processEvents()
-        playing = {key for key, state in self.engine.previews().items() if state[0]}
-        self.assertTrue(all(key[0] != self.index(drums) for key in playing))
-        self.assertEqual(playing, {(index, bar) for index, bars in picks.items() for bar in bars})
+        self.assertEqual(self.sounding_blocks(), {(index, bar) for index, bars in picks.items() for bar in bars})
 
     def test_a_click_on_play_in_a_drag_box_plays_the_box(self):
         drums, bass, other, _vocals = self.split("Song")
         view = self.window._view_for(self.index(drums))
         view.set_picks({self.index(drums): {1, 2}, self.index(bass): {1}})
         self.click(self.index(bass), 1)
-        playing = {key for key, state in self.engine.previews().items() if state[0]}
-        self.assertEqual(playing, {(self.index(drums), 1), (self.index(drums), 2), (self.index(bass), 1)})
+        self.assertEqual(self.sounding_blocks(), {(self.index(drums), 1), (self.index(drums), 2), (self.index(bass), 1)})
         self.assertEqual(view.picks(), {self.index(drums): {1, 2}, self.index(bass): {1}})  # still picked
         # A block outside the box plays only itself, joining in step.
         self.click(self.index(other), 3)
@@ -671,8 +682,9 @@ class SharedClockWindowTests(unittest.TestCase):
         error = lag_samples(mixed, frame, (1, 2))
         report("after a canvas transfer", error)
         self.assertLess(error, 0.25)
-        states = self.engine.previews()
-        self.assertTrue(states[(self.index(bass), stem_block(0))][0])
+        # Its voice follows it to the block it now lands on, still playing.
+        playing = [key for key, state in self.engine.previews().items() if state[0] and key[0] == self.index(bass)]
+        self.assertEqual(len(playing), 1)
         self.assertFalse(self.engine.playing)
 
     def test_save_and_load_keep_the_split_together(self):

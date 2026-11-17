@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 import numpy as np
@@ -46,7 +47,7 @@ class _Voice:
     """
 
     __slots__ = (
-        "key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "cycle", "generation",
+        "key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "generation",
     )
 
     def __init__(self, key, clip: int, start: int, end: int, group=None):
@@ -60,12 +61,6 @@ class _Voice:
         self.muted = False
         self.shift = 0
         self.length = None
-        # A block of a combined loop. ``cycle`` is (0, its row's length):
-        # each row loops on its own length, never cut short by a longer
-        # one, and every row follows the shared clock (``_master``), so they
-        # stay in time. The block sounds inside its own [start, end) of the
-        # row. ``shift`` turns row time into its arrangement place.
-        self.cycle = None
         # Set by the engine when the voice is made: a key reused for a new
         # voice gets a new number, so a pause, resume or stop meant for the
         # old one (a late click, a stale callback) cannot reach the new one.
@@ -115,6 +110,29 @@ class _Group:
         self.segments = segments
         self.next_cursor = cursor
         self.next_fading = fading
+
+
+def output_latency():
+    """The output buffer PortAudio is asked for. "high" is the device's
+    safe latency (35 ms on a typical ALSA device, against 9 ms for "low",
+    which is less than one 512-frame block): a callback held up a few
+    milliseconds by the GUI (a repaint holds Python's lock while it runs)
+    still finds audio queued, so it does not drop out. Quality is the same;
+    the playhead already accounts for the output latency.
+    SONICLAB_AUDIO_LATENCY overrides it: "low", "high" or seconds."""
+    value = os.environ.get("SONICLAB_AUDIO_LATENCY", "high").strip().lower()
+    if value in ("low", "high"):
+        return value
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return "high"
+
+
+def _frame(seconds) -> int:
+    """Seconds as the nearest sample frame. Truncating would put a stem
+    whose start or offset lands a hair under a frame one sample early."""
+    return int(round(float(seconds) * OUTPUT_RATE))
 
 
 def _loop_frames(loop):
@@ -250,16 +268,18 @@ class AudioEngine:
         # cursor, sounds at), swapped in whole like ``_preview_view``.
         self._groups: dict = {}
         self._group_view: dict = {}
-        # The one clock every block loop shares: frames since the first of
-        # the voices now playing started. It moves on while any plays and
-        # holds while none does. A loop started (or resumed) while others
-        # play joins it at its phase. Resuming keeps a voice's own place.
-        self._master = 0
         # Voice generations (see _Voice.generation), and the keys of blocks
         # that played to their end by themselves, by generation.
         self._generations = 0
         self._completed: dict = {}
         self._state_view: dict = {}
+        # Diagnostics, written by the callback without allocating: its last
+        # durations (seconds), callbacks counted, deadline misses (a block
+        # took longer than it lasts) and underruns PortAudio reported.
+        self._timing = np.zeros(4096, dtype=np.float64)
+        self._timed = 0
+        self._late = 0
+        self._underruns = 0
         self._limit_gain = 1.0
 
     @property
@@ -327,7 +347,7 @@ class AudioEngine:
         with self._lock:
             self._clips.append({
                 "audio": np.ascontiguousarray(audio),
-                "start": max(0, int(start_seconds * OUTPUT_RATE)),
+                "start": max(0, _frame(start_seconds)),
                 "offset": 0,
                 "length": int(audio.shape[0]),
                 "fade_in": 0,
@@ -364,7 +384,7 @@ class AudioEngine:
     def set_clip_start(self, index, seconds):
         with self._lock:
             if 0 <= index < len(self._clips):
-                self._clips[index]["start"] = max(0, int(seconds * OUTPUT_RATE))
+                self._clips[index]["start"] = max(0, _frame(seconds))
 
     def set_clip_gain(self, index, gain):
         with self._lock:
@@ -391,11 +411,11 @@ class AudioEngine:
             if not (0 <= index < len(self._clips)):
                 return
             clip = self._clips[index]
-            clip["start"] = max(0, int(float(start) * OUTPUT_RATE))
-            clip["offset"] = max(0, int(float(offset) * OUTPUT_RATE))
-            clip["length"] = max(1, int(float(duration) * OUTPUT_RATE))
-            clip["fade_in"] = max(0, int(float(fade_in) * OUTPUT_RATE))
-            clip["fade_out"] = max(0, int(float(fade_out) * OUTPUT_RATE))
+            clip["start"] = max(0, _frame(start))
+            clip["offset"] = max(0, _frame(offset))
+            clip["length"] = max(1, _frame(duration))
+            clip["fade_in"] = max(0, _frame(fade_in))
+            clip["fade_out"] = max(0, _frame(fade_out))
             clip["clip_gain"] = float(clip_gain)
 
     def render(self, start_frame, frames, include=None):
@@ -442,7 +462,7 @@ class AudioEngine:
 
     def seek(self, seconds):
         with self._lock:
-            self._position = max(0, int(seconds * OUTPUT_RATE))
+            self._position = max(0, _frame(seconds))
             # Show the new place at once and hold it there until the first
             # block from it reaches the speakers.
             self._heard = ((time.monotonic(), ((self._position, 0),)),) if self._playing else ()
@@ -492,6 +512,22 @@ class AudioEngine:
         return segments, cursor
 
     def _callback(self, outdata, frames, time_info, status):
+        """The audio thread's entry: render, and time it for diagnostics
+        (two clock reads and a store into a preallocated array)."""
+        began = time.perf_counter()
+        try:
+            self._render(outdata, frames, time_info)
+        finally:
+            took = time.perf_counter() - began
+            timing = self._timing
+            timing[self._timed % len(timing)] = took
+            self._timed += 1
+            if took > int(frames) / OUTPUT_RATE:
+                self._late += 1
+            if status is not None and getattr(status, "output_underflow", False):
+                self._underruns += 1
+
+    def _render(self, outdata, frames, time_info):
         outdata.fill(0)
         with self._lock:
             playing = self._playing
@@ -562,11 +598,11 @@ class AudioEngine:
         clips = self._clips
         groups = self._groups
         finished = []
+        # Solo silences the other voices; like mute it never moves a clock.
+        soloed = any(clip.get("solo") for clip in clips)
         for group in groups.values():
             group.running = False
             group.plan(frames)
-        if any(voice.playing for voice in self._voices.values()):
-            self._master += frames
         for key, voice in self._voices.items():
             if not (0 <= voice.clip < len(clips)):
                 finished.append(key)
@@ -585,13 +621,9 @@ class AudioEngine:
                 if not voice.playing:
                     continue
                 group.running = True
-                if voice.muted:
+                if voice.muted or (soloed and not clip.get("solo")):
                     continue
                 peak = self._mix_stem(outdata, clip, clip["start"] - offset + voice.shift, group, _own_length(voice, group.loop))
-            elif voice.cycle is not None:
-                if not voice.playing:
-                    continue
-                peak = self._mix_cycle(outdata, frames, clip, voice)
             else:
                 if not voice.playing:
                     continue
@@ -708,22 +740,6 @@ class AudioEngine:
         for key in [key for key in self._groups if key not in used]:
             del self._groups[key]
 
-    def _sharing(self, starting=()) -> bool:
-        """Whether voices other than ``starting`` play now, so what starts
-        joins the shared clock. With none playing it restarts from zero:
-        what starts now sets the time."""
-        if any(voice.playing for key, voice in self._voices.items() if key not in starting):
-            return True
-        self._master = 0
-        return False
-
-    def _join_group(self, group) -> None:
-        """Put a looping group's clock on the shared clock's phase."""
-        if group.loop is not None:
-            first, last = group.loop
-            group.cursor = group.next_cursor = first + self._master % (last - first)
-            group.fading = group.next_fading = False
-
     def _limit(self, outdata, frames: int) -> None:
         """Peak limiter for stacked preview voices: instant attack, smooth
         release, so several loud stems together do not hard-clip."""
@@ -740,80 +756,6 @@ class AudioEngine:
         self._limit_gain = float(target)
         if target < 1.0 or previous < 1.0:
             outdata[:frames] *= gain[:, None]
-
-    @staticmethod
-    def _mix_cycle(outdata, frames: int, clip, voice) -> float:
-        """One block of a combined loop: walk the shared cycle, wrapping at
-        its end, and add the clip only inside the voice's own block."""
-        first, last = voice.cycle
-        own = voice.length or (last - first)
-        cursor = voice.cursor
-        filled = 0
-        peak = 0.0
-        while filled < frames:
-            if cursor >= last:
-                cursor = first
-            local = (cursor - first) % own  # where its row's part is now
-            span = min(frames - filled, last - cursor, own - local)
-            low = max(local, voice.start)
-            high = min(local + span, voice.end)
-            if high > low:
-                at = filled + (low - local)
-                peak = max(peak, mix_clip_into(outdata[at : at + (high - low)], clip, low + voice.shift))
-            cursor += span
-            filled += span
-        voice.cursor = cursor
-        return peak
-
-    def preview_loop(self, blocks) -> None:
-        """Play blocks as one combined loop on one shared clock.
-
-        ``blocks`` is a list of ``(key, clip index, start, end, row)``, with
-        start and end in arrangement seconds. Every row starts at the same
-        moment: a row's blocks play one after another, with the empty time
-        between them left out. Each row loops on its own length with no gap,
-        and is never cut or restarted when a longer row ends. Every row
-        reads the shared clock, so rows stay in time and meet again where
-        their lengths do. Voices already under these keys are replaced; if
-        any of them were playing, the loop goes on from where the clock is
-        (adding a track does not restart the others). Raises if the audio
-        output cannot start.
-        """
-        rows: dict = {}
-        for key, clip, start, end, row in blocks:
-            first = max(0, int(round(float(start) * OUTPUT_RATE)))
-            last = int(round(float(end) * OUTPUT_RATE))
-            if last > first:
-                rows.setdefault(row, []).append((first, last, key, clip))
-        if not rows:
-            return
-        placed = []  # (key, clip, row start, row end, shift, row length)
-        for members in rows.values():
-            # A row's blocks one after another, the gaps between them dropped.
-            members.sort()
-            cursor = 0
-            laid = []
-            for first, last, key, clip in members:
-                laid.append((key, clip, cursor, cursor + (last - first), first - cursor))
-                cursor += last - first
-            length = cursor
-            placed.extend((key, clip, a, b, shift, length) for key, clip, a, b, shift in laid)
-        with self._lock:
-            keys = {item[0] for item in placed}
-            going = any(self._voices[key].playing for key in keys if key in self._voices)
-            # Joining loops already playing (or this loop growing while it
-            # plays): each row starts at the shared clock's place in it.
-            if not going:
-                self._sharing(keys)  # with nothing else playing, the clock starts at zero
-            for key, clip, a, b, shift, length in placed:
-                voice = self._new_voice(key, clip, a, b)
-                voice.shift = shift
-                voice.length = length
-                voice.cycle = (0, length)
-                voice.cursor = self._master % length
-                self._voices[key] = voice
-            self._publish_previews()
-        self._ensure_stream()
 
     def _publish_previews(self, sounds_at: float | None = None) -> None:
         """Swap in what the UI reads about each voice. From the callback,
@@ -836,17 +778,20 @@ class AudioEngine:
 
         clips = self._clips
         groups = self._groups
+        # A song's clock first: its stems all read their place from it, so
+        # every stem of one song always shows the same position.
+        group_view = {}
+        for key, group in groups.items():
+            old = previous_groups.get(key)
+            old = (old[0], old[1], old[2]) if old is not None else None
+            group_view[key] = (group.running, group.cursor, stamp(old, group.running, group.cursor), group.loop)
         view = {}
         for key, voice in self._voices.items():
             old = previous.get(key)
             old = (old[1], old[4], old[6]) if old is not None else None
             if voice.group is None:
                 when = stamp(old, voice.playing, voice.cursor)
-                if voice.cycle is not None:
-                    own = voice.length or None
-                    view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, voice.shift, when, voice.cycle, own)
-                else:
-                    view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, 0, when, None, None)
+                view[key] = (voice.playing, voice.playing, voice.start, voice.end, voice.cursor, 0, when, None, None)
                 continue
             group = groups.get(voice.group)
             if group is None or not (0 <= voice.clip < len(clips)):
@@ -858,21 +803,17 @@ class AudioEngine:
             # A paused stem shows where it was paused (``cursor``), still.
             moving = voice.playing and group.running
             cursor = group.cursor if voice.playing else voice.cursor
+            when = group_view[voice.group][2] if moving else stamp(old, False, cursor)
             view[key] = (
                 voice.playing, moving, offset - voice.shift, end - voice.shift,
                 cursor,
-                clip["start"] - offset + voice.shift, stamp(old, moving, cursor), group.loop, _own_length(voice, group.loop),
+                clip["start"] - offset + voice.shift, when, group.loop, _own_length(voice, group.loop),
             )
         self._preview_view = view
         states = {key: (COMPLETED, generation) for key, generation in self._completed.items()}
         for key, voice in self._voices.items():
             states[key] = (PLAYING if voice.playing else PAUSED, voice.generation)
         self._state_view = states
-        group_view = {}
-        for key, group in groups.items():
-            old = previous_groups.get(key)
-            old = (old[0], old[1], old[2]) if old is not None else None
-            group_view[key] = (group.running, group.cursor, stamp(old, group.running, group.cursor), group.loop)
         self._group_view = group_view
 
     def _sounds_at(self, time_info) -> float:
@@ -953,8 +894,6 @@ class AudioEngine:
                 if frames is not None:
                     first = frames[0]
                 self._groups[group] = _Group(group, first, frames)
-                if self._sharing({member[0] for member in members}):
-                    self._join_group(self._groups[group])
             elif loop is not None:
                 self._groups[group].loop = frames
             for member in members:
@@ -1134,6 +1073,78 @@ class AudioEngine:
     def voice_state(self, key) -> tuple[str, int]:
         return self._state_view.get(key, (STOPPED, 0))
 
+    def diagnostics(self) -> dict:
+        """Audio health: callback durations (mean, p95, p99, max in ms over
+        the last 4096 callbacks), deadline misses, PortAudio underruns, the
+        load (time spent rendering / time available), voices and any voice
+        that duplicates another, and the stream's real rate, block and
+        latency. Lock-free reads; the stream fields need an open stream."""
+        count = min(self._timed, len(self._timing))
+        durations = np.sort(self._timing[:count]) * 1000.0 if count else np.zeros(1)
+        budget = BLOCK_SIZE / OUTPUT_RATE * 1000.0
+        report = self.voice_report()
+        seen: dict = {}
+        duplicates = []
+        for row in report:
+            if row["state"] != PLAYING or row["file_span"] is None:
+                continue
+            same = (row["clip"], row["group"], round(row["file_span"][0], 6), round(row["file_span"][1], 6))
+            if same in seen:
+                duplicates.append((seen[same], row["key"]))
+            else:
+                seen[same] = row["key"]
+        stream = self._stream
+        return {
+            "callbacks": int(self._timed),
+            "mean_ms": float(durations.mean()),
+            "p95_ms": float(durations[int(0.95 * (len(durations) - 1))]),
+            "p99_ms": float(durations[int(0.99 * (len(durations) - 1))]),
+            "max_ms": float(durations[-1]),
+            "budget_ms": budget,
+            "load": float(durations.mean() / budget),
+            "deadline_misses": int(self._late),
+            "underruns": int(self._underruns),
+            "voices": sum(1 for row in report if row["state"] in (PLAYING, PAUSED)),
+            "mixed_voices": sum(1 for row in report if row["mixed"]),
+            "duplicates": duplicates,
+            "sample_rate": float(stream.samplerate) if stream is not None else float(OUTPUT_RATE),
+            "block_size": int(BLOCK_SIZE),
+            "latency_s": float(stream.latency) if stream is not None else None,
+            "requested_latency": output_latency(),
+        }
+
+    def voice_report(self) -> list[dict]:
+        """Every voice the mixer holds, for diagnostics and for following a
+        block after an edit: key, generation, state, whether it is mixed into
+        the output now, its clip and group, and ``file_span``: the stretch of
+        the stem file it loops, ``(start, length)`` in seconds, for a split stem's
+        block voice (None for others).
+        A key that is not here is not mixed: STOPPED means silent."""
+        with self._lock:
+            rows = []
+            for key, voice in self._voices.items():
+                group = self._groups.get(voice.group) if voice.group is not None else None
+                span = None
+                if group is not None and group.loop is not None:
+                    length = voice.length or (group.loop[1] - group.loop[0])
+                    span = ((group.loop[0] + voice.shift) / OUTPUT_RATE, length / OUTPUT_RATE)
+                rows.append({
+                    "key": key,
+                    "generation": voice.generation,
+                    "state": PLAYING if voice.playing else PAUSED,
+                    "mixed": bool(
+                        voice.playing and not voice.muted and 0 <= voice.clip < len(self._clips)
+                        and (voice.group is None or group is not None)
+                    ),
+                    "clip": voice.clip,
+                    "group": voice.group,
+                    "file_span": span,
+                })
+            for key, generation in self._completed.items():
+                rows.append({"key": key, "generation": generation, "state": COMPLETED, "mixed": False,
+                             "clip": None, "group": None, "file_span": None})
+            return rows
+
     def previews(self, now: float | None = None) -> dict:
         """``key -> (playing, seconds)`` for every preview voice.
 
@@ -1146,9 +1157,9 @@ class AudioEngine:
 
     def sounding_time(self, now: float | None = None) -> float | None:
         """Arrangement seconds heard now from the block voices, or None when
-        none plays. Taken from a voice whose own block is sounding: in a
-        combined loop each block holds its time while its row plays another
-        block, so that one would stand still. Lock-free."""
+        none plays. Taken from a voice whose own block is sounding: a block
+        shorter than its song clock's loop holds its time while the clock is
+        past it, so that one would stand still. Lock-free."""
         heard = sorted(
             (not inside, key, seconds)
             for key, playing, seconds, inside in self._heard_previews(now)
@@ -1187,6 +1198,7 @@ class AudioEngine:
                     channels=2,
                     dtype="float32",
                     blocksize=BLOCK_SIZE,
+                    latency=output_latency(),
                     callback=self._callback,
                 )
                 self._stream.start()

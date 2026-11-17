@@ -89,13 +89,19 @@ def _fingerprint(samples: np.ndarray) -> bytes:
     return np.ascontiguousarray(samples[::step][:16]).tobytes()
 
 
+# Envelope cache use, for the diagnostics report.
+CACHE_STATS = {"hits": 0, "misses": 0}
+
+
 def cached_envelope(audio) -> tuple[np.ndarray, np.ndarray]:
     """High-resolution peaks for one buffer. Repeated calls reuse the cache."""
     key = _buffer_key(audio)
     if key is not None:
         known = _BY_BUFFER.get(key[0])
         if known is not None and known[0]() is key[1]:
+            CACHE_STATS["hits"] += 1
             return known[1]
+    CACHE_STATS["misses"] += 1
     found = _envelope(audio)
     if key is not None:
         if len(_BY_BUFFER) > 64:
