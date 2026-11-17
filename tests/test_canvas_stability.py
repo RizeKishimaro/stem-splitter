@@ -27,7 +27,7 @@ from shiboken6 import isValid
 
 from soniclab.core.audio_engine import OUTPUT_RATE
 from soniclab.ui import timeline as timeline_module
-from soniclab.ui.main_window import MainWindow
+from soniclab.ui.main_window import MainWindow, stem_block
 from soniclab.ui.timeline import PIXELS_PER_SECOND, ClipItem
 
 
@@ -343,17 +343,28 @@ class StabilityTests(unittest.TestCase):
         engine = window.engine
         with patch.object(engine, "_ensure_stream", lambda: None):
             window._start_blocks([(1, 3)])  # bass, bar 4
+            # A block voice is keyed (track, stem_block(bar)): it plays on its
+            # source song's clock. Its identity is its generation.
+            key = (1, stem_block(3))
+            generation = engine.voice_state(key)[1]
             out = np.zeros((256, 2), np.float32)
             engine._callback(out, 256, None, None)
+            group = engine._voices[key].group
+            before = engine._groups[group].cursor
             clip = self.clips(window.timeline)[0]
             grab = self.grab_point(clip, 2.5)
             self.drag(window.timeline, grab, window.timeline2, QPointF(grab.x(), 60))
             for _ in range(3):
                 self.app.processEvents()
             bass = window.project.tracks.index(self.track("bass"))
-            self.assertIn((bass, 3), engine.previews())
+            # The unrelated bass voice: the same voice, same block, its clock
+            # not moved or restarted by the transfer.
+            self.assertIn((bass, stem_block(3)), engine.previews())
+            self.assertEqual(engine.voice_state((bass, stem_block(3)))[1], generation)
+            self.assertEqual(engine._groups[group].cursor, before)
             engine._callback(out, 256, None, None)
             self.assertAlmostEqual(float(out[0, 0]), 0.1, places=4)
+            self.assertEqual(engine._groups[group].cursor, before + 256)
 
     # -- imports
 

@@ -61,49 +61,63 @@ class ShortBlockTests(SharedClockWindowTests):
         self.app.processEvents()
         return added
 
-    def cut(self, track, lengths) -> list[int]:
-        """Cut ``track`` with Split in Half until its pieces end on the
-        segment edges of ``lengths``; the piece indices for those segments,
-        in time order. Each cut halves a piece (up to the last edge), so the
-        lengths are chosen to sit on halves of halves."""
-        tracks = self.window.project.tracks
-        edges = list(np.cumsum([0.0, *lengths]))
-        group, path = track.get("stem_group"), track["path"]
+    def cut(self, track, lengths) -> list[tuple[int, int]]:
+        """Split ``track`` with Split in Half so its blocks end on the segment
+        edges of ``lengths``; the blocks for those segments, as ``(track
+        index, bar)``, in time order. A split is a mark on the same track, so
+        every block is on ``track`` itself."""
+        window = self.window
+        index = self.index(track)
+        view = window._view_for(index)
+        start = float(track.get("start", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        edges = [offset + edge for edge in np.cumsum([0.0, *lengths])]
 
-        def pieces():
-            return [i for i, t in enumerate(tracks) if t.get("stem_group") == group and t.get("path") == path]
+        def blocks():
+            spans = view._spans_of(view._clip_for(index))
+            return [(offset + float(span[3]), offset + float(span[4]), float(span[3])) for span in spans]
 
-        for _round in range(12):
-            wide = []
-            for i in pieces():
-                start = float(tracks[i]["start"])
-                end = start + float(tracks[i]["duration"])
-                if any(start + 1e-6 < edge < end - 1e-6 for edge in edges):
-                    wide.append(i)
-            if not wide:
-                break
-            for i in sorted(wide, key=lambda i: -float(tracks[i]["start"])):
-                start = float(tracks[i]["start"])
-                end = min(start + float(tracks[i]["duration"]), edges[-1])
-                self.window._split_stem_in_half(i, 0.0, end - start)
-            self.app.processEvents()
-        found = {round(float(tracks[i]["start"]), 6): i for i in pieces()}
-        result = [found.get(round(edge, 6)) for edge in edges[:-1]]
-        self.assertNotIn(None, result, f"pieces start at {sorted(found)}")
-        for k, i in enumerate(result):
-            self.assertAlmostEqual(float(tracks[i]["duration"]), lengths[k], places=6)
+        # Each edge inside a block gets a split whose block-half is centred on
+        # it, so the mark lands on the edge exactly.
+        for edge in edges[1:]:
+            for a, b, local_a in blocks():
+                if a + 1e-6 < edge < b - 1e-6:
+                    half = min(edge - a, b - edge)
+                    window._split_stem_in_half(index, edge - offset - half, 2 * half)
+                    self.app.processEvents()
+                    break
+        result = []
+        for k, length in enumerate(lengths):
+            bar = view.block_at_time(index, start + edges[k] - offset + 1e-4)
+            self.assertIsNotNone(bar, f"no block at {edges[k]}")
+            times = view.block_times(index, bar)
+            self.assertAlmostEqual(times[1] - times[0], length, places=6)
+            result.append((index, bar))
+        self.assertEqual(sum(t is track for t in window.project.tracks), 1)  # still one track
         return result
 
-    def bar(self, index: int) -> int:
-        track = self.window.project.tracks[index]
-        return self.window._view_for(index).block_at_time(index, float(track["start"]) + 1e-3)
+    @staticmethod
+    def _track_of(block) -> int:
+        return block[0] if isinstance(block, tuple) else int(block)
 
-    def toggle(self, index: int) -> None:
-        self.window._toggle_block(index, self.bar(index))
+    def bar(self, block) -> int:
+        """A block's bar; a track index alone means its first block."""
+        if isinstance(block, tuple):
+            return block[1]
+        track = self.window.project.tracks[block]
+        return self.window._view_for(block).block_at_time(block, float(track["start"]) + 1e-3)
 
-    def stop(self, index: int) -> None:
-        key = self.window._block_voice(index, self.bar(index), self.engine.previews())
+    def toggle(self, block) -> None:
+        self.window._toggle_block(self._track_of(block), self.bar(block))
+
+    def stop(self, block) -> None:
+        index = self._track_of(block)
+        key = self.window._block_voice(index, self.bar(block), self.engine.previews())
         self.window._stop_block(key)
+
+    def voice_of(self, block):
+        """The voice key that plays ``block`` now (or would)."""
+        return self.window._block_voice(self._track_of(block), self.bar(block), self.engine.previews())
 
     def mix(self, blocks: int) -> np.ndarray:
         out = np.zeros((BLOCK, 2), np.float32)
@@ -178,7 +192,8 @@ class ShortBlockTests(SharedClockWindowTests):
             burst = self.mix(int(0.1 * OUTPUT_RATE / BLOCK))
             for k in range(len(pieces)):
                 self.assertPlaying(burst, k, "through a play/stop burst")
-        playing = [key for key, state in self.engine.previews().items() if state[0] and key[0] in pieces]
+        keys = {self.voice_of(piece) for piece in pieces}
+        playing = [key for key, state in self.engine.previews().items() if state[0] and key in keys]
         self.assertEqual(len(playing), len(pieces))  # one voice each, none duplicated
         ids = {self.engine.voice_state(key)[1] for key in playing}
         self.assertEqual(len(ids), len(pieces))
@@ -211,9 +226,10 @@ class ShortBlockTests(SharedClockWindowTests):
         lengths = [0.125] * 4
         drums, *_rest = self.make("Song", lengths)
         pieces = self.cut(drums, lengths)
-        view = self.window._view_for(pieces[0])
-        view.set_picks({piece: {self.bar(piece)} for piece in pieces})
-        self.window._toggle_block(pieces[0], self.bar(pieces[0]))  # the shared ▶
+        index = pieces[0][0]
+        view = self.window._view_for(index)
+        view.set_picks({index: {bar for _track, bar in pieces}})
+        self.window._toggle_block(*pieces[0])  # the shared ▶
         mixed = self.mix(int(0.6 * OUTPUT_RATE / BLOCK))
         for k in range(len(pieces)):
             self.assertPlaying(mixed, k, "in the selection loop")
@@ -237,26 +253,16 @@ class ShortBlockTests(SharedClockWindowTests):
     def test_blocks_on_other_tracks_and_canvases(self):
         lengths = [0.125] * 4
         drums, bass, *_rest = self.make("Song", lengths)
-        drum_pieces = self.cut(drums, lengths)
-        self.cut(bass, lengths)
+        self.cut(drums, lengths)
         self.window._toggle_second_canvas(True)
-        self.window._move_track_to_canvas(drum_pieces[2], 1, start=4.0)  # the drum pieces' row
+        self.window._move_track_to_canvas(self.index(drums), 1, start=4.0)  # the split track, marks and all
         self.app.processEvents()
-        tracks = self.window.project.tracks
-
-        def piece(stem, tone):
-            """The piece of ``stem`` that holds ``tone``: its place in the file."""
-            return next(
-                i for i, t in enumerate(tracks)
-                if t.get("path") == stem["path"] and abs(float(t.get("offset", 0.0) or 0.0) - 0.125 * tone) < 1e-6
-                and abs(float(t["duration"]) - 0.125) < 1e-6
-            )
-
-        moved = [piece(drums, 0), piece(drums, 2)]
-        self.assertTrue(all(tracks[i].get("canvas") == 1 for i in moved))
-        self.assertNotEqual(tracks[piece(bass, 1)].get("canvas"), 1)
-        # Tones 0 and 2 from drum pieces on Canvas 2, tone 1 from bass here.
-        self.check_concurrent([moved[0], piece(bass, 1), moved[1]], 0.125)
+        drum_blocks = self.cut(drums, lengths)  # the same blocks, found in their new place
+        bass_blocks = self.cut(bass, lengths)
+        self.assertEqual(drums.get("canvas"), 1)
+        self.assertNotEqual(bass.get("canvas"), 1)
+        # Tones 0 and 2 from drum blocks on Canvas 2, tone 1 from bass here.
+        self.check_concurrent([drum_blocks[0], bass_blocks[1], drum_blocks[2]], 0.125)
 
     def test_short_blocks_beside_a_looping_selection(self):
         lengths = [0.125] * 2
@@ -266,8 +272,9 @@ class ShortBlockTests(SharedClockWindowTests):
         view = self.window._view_for(vocals_index)
         view.set_picks({vocals_index: {0, 1}})  # the selection loops on its own
         self.window._toggle_block(vocals_index, 0)
-        self.window._deselect_all()
-        self.check_concurrent([self.index(self.window.project.tracks[i]) for i in pieces], 0.125)
+        # It stays selected: deselecting would end selection playback. The
+        # unselected pieces play, stop and restart with their own ▶ beside it.
+        self.check_concurrent(pieces, 0.125)
         loop = self.mix(int(0.3 * OUTPUT_RATE / BLOCK))
         self.assertTrue(np.all(self.levels(loop, 250.0) > ON))  # the loop never stopped
         self.assertTrue(all(state[0] for key, state in self.engine.previews().items() if key[0] == vocals_index))

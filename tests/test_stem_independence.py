@@ -155,20 +155,18 @@ class StemIndependenceTests(SharedClockWindowTests):
 
     def test_a_row_of_a_loop_pauses_alone(self):
         drums, bass, other, _vocals = self.make("Song")
-        view = self.window._view_for(self.index(drums))
-        # A 6 s row (other) and two 2 s rows.
-        view.set_picks({self.index(drums): {0}, self.index(bass): {1}, self.index(other): {0, 1, 2}})
-        self.press(self.index(drums), 0)  # the selection as one loop
+        # Three loops on one song clock, each started with its own ▶ (a
+        # deselected selection would stop instead).
+        self.press(self.index(other), 0)
+        self.press(self.index(drums), 0)
+        self.press(self.index(bass), 1)
         self.listen(0.5)
-        self.window._deselect_all()  # unselected, each block's ▶ is its own
-        for bar in (0, 1, 2):
-            self.window._toggle_block(self.index(other), bar)
-        heard = self.listen(8.0)  # past the 6 s row's end
+        self.window._toggle_block(self.index(other), 0)  # ⏸ other's loop alone
+        heard = self.listen(8.0)  # well past its 2 s block's end
         self.assertSilent(heard, "other")
         self.assertSounds(heard, "drums")
         self.assertSounds(heard, "bass")
-        for bar in (0, 1, 2):
-            self.window._toggle_block(self.index(other), bar)
+        self.window._toggle_block(self.index(other), 0)  # ▶ again
         heard = self.listen(1.0)
         for name in ("drums", "bass", "other"):
             self.assertSounds(heard, name)

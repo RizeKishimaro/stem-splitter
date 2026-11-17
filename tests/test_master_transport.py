@@ -252,24 +252,20 @@ class SongClockTests(SharedClockWindowTests):
         self.app.processEvents()
         cached = self.window.project.tracks[len(fresh):]
         self.assertEqual(stem_group(cached[0]), stem_group(fresh[0]))
-        # Cut the cached bass into 0.125 s pieces; play one of them, plus
-        # fresh drums and cached vocals.
+        # Split the cached bass so 0.25-0.375 s is a block of its own; play
+        # that block, plus fresh drums and cached vocals.
         bass = cached[1]
-        for _ in range(4):
-            pieces = [i for i, t in enumerate(self.window.project.tracks) if t is bass or (
-                t.get("path") == bass["path"] and t.get("stem_group") == bass["stem_group"] and float(t["start"]) < 1.0
-                and float(t["duration"]) > 0.13)]
-            for i in sorted(pieces, key=lambda i: -float(self.window.project.tracks[i]["start"])):
-                t = self.window.project.tracks[i]
-                self.window._split_stem_in_half(i, 0.0, min(float(t["duration"]), 1.0 - float(t["start"])))
-        tracks = self.window.project.tracks
-        piece = next(t for t in tracks if t.get("path") == bass["path"] and abs(float(t["start"]) - 0.25) < 1e-6
-                     and abs(float(t["duration"]) - 0.125) < 1e-6 and t is not fresh[1])
+        index = self.index(bass)
+        self.window._split_stem_in_half(index, 0.0, 0.5)  # a mark at 0.25 s
+        self.window._split_stem_in_half(index, 0.25, 0.25)  # and at 0.375 s
+        self.assertEqual(bass.get("splits"), [0.25, 0.375])
         self.press(self.index(fresh[0]), 0)
-        index = self.index(piece)
-        self.press(index, self.window._view_for(index).block_at_time(index, 0.26))
+        bar = self.window._view_for(index).block_at_time(index, 0.26)
+        times = self.window._view_for(index).block_times(index, bar)
+        self.assertEqual((round(float(times[0]), 6), round(float(times[1]), 6)), (0.25, 0.375))
+        self.press(index, bar)
         self.press(self.index(cached[3]), 1)
-        self.measure("fresh, cached and a 0.125 s piece", [fresh[0], piece, cached[3]], (FREQS[0], FREQS[1], FREQS[3]))
+        self.measure("fresh, cached and a 0.125 s block", [fresh[0], bass, cached[3]], (FREQS[0], FREQS[1], FREQS[3]))
 
     def test_a_canvas_transfer_and_save_load_keep_alignment(self):
         tracks = self.make("Song")

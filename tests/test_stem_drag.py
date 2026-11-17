@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
 from soniclab.core.audio_engine import OUTPUT_RATE
-from soniclab.ui.main_window import MainWindow
+from soniclab.ui.main_window import MainWindow, stem_block
 from soniclab.ui.timeline import PIXELS_PER_SECOND, ClipItem
 
 
@@ -179,11 +179,11 @@ class StemDragTests(unittest.TestCase):
             left = Qt.MouseButton.LeftButton
             self.send(self.main, QEvent.Type.MouseButtonPress, at, left)
             self.send(self.main, QEvent.Type.MouseButtonRelease, at, Qt.MouseButton.NoButton)
-            self.assertTrue(self.window.engine.previews()[(1, 1)][0])
+            self.assertTrue(self.window.engine.previews()[(1, stem_block(1))][0])
             self.assertTrue(button.playing)
             self.send(self.main, QEvent.Type.MouseButtonPress, at, left)
             self.send(self.main, QEvent.Type.MouseButtonRelease, at, Qt.MouseButton.NoButton)
-            self.assertFalse(self.window.engine.previews()[(1, 1)][0])
+            self.assertFalse(self.window.engine.previews()[(1, stem_block(1))][0])
         self.assertEqual(self.names(), ["drums", "bass", "vocals"])
 
     # -- cancel and refuse
@@ -265,14 +265,14 @@ class StemDragTests(unittest.TestCase):
 
         clip = self.clips(self.main)[0]
         grab = self.grab_point(clip, 4.5)
-        steps = len(window.history._undo) if hasattr(window.history, "_undo") else None
+        steps = window.history.done  # the persistent history: one undo step per gesture
         with patch.object(window, "_refresh_timeline", counted):
             self.drag(self.main, grab, self.second, QPointF(grab.x(), 60))
         moved = [track for track in window.project.tracks if track.get("canvas") == 1]
         self.assertEqual(len(moved), 3)
         self.assertEqual(len(refreshes), 1)
         if steps is not None:
-            self.assertEqual(len(window.history._undo), steps + 1)
+            self.assertEqual(window.history.done, steps + 1)
         window._undo()
         self.assertEqual(self.names(), ["drums", "bass", "vocals"])
 
@@ -281,13 +281,18 @@ class StemDragTests(unittest.TestCase):
         engine = window.engine
         with patch.object(engine, "_ensure_stream", lambda: None):
             window._start_blocks([(0, 1), (1, 1)])
+            # Block voices are keyed (track, stem_block(bar)) on their song's
+            # clock; their identity is their generation.
+            generations = {key: engine.voice_state(key)[1] for key in engine.previews()}
             window._move_track_to_canvas(2, 1)
             for _ in range(3):
                 self.app.processEvents()
             out = np.zeros((256, 2), np.float32)
             engine._callback(out, 256, None, None)
         self.assertAlmostEqual(float(out[0, 0]), 0.6, places=4)
-        self.assertEqual(sorted(engine.previews()), [(0, 1), (1, 1)])
+        self.assertEqual(sorted(engine.previews()), [(0, stem_block(1)), (1, stem_block(1))])
+        # Moving another track kept both voices: not replaced, not restarted.
+        self.assertEqual({key: engine.voice_state(key)[1] for key in engine.previews()}, generations)
         self.assertTrue(self.second.isVisible())
 
 

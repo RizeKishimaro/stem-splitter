@@ -10,6 +10,14 @@ class Project:
         # or the tempo when there are no drum downbeats.
         self.bars = []
         self.tracks = []
+        # The session's musical timeline (SessionTimeline.to_dict()), the
+        # authority for bars and tempo. ``bars`` above is kept beside it as
+        # bar-line seconds for older SonicLab builds; None in a project saved
+        # before the timeline existed, which is migrated when it is opened.
+        self.timeline = None
+        # The Track Registry and action history (see track_registry): stable
+        # ids for songs, stems and segments. None before it existed.
+        self.registry = None
 
     def to_dict(self):
         return {
@@ -19,6 +27,8 @@ class Project:
             "time_signature": self.time_signature,
             "bars": self.bars,
             "tracks": self.tracks,
+            **({"timeline": self.timeline} if self.timeline else {}),
+            **({"registry": self.registry} if self.registry else {}),
         }
 
     def save(self, path):
@@ -33,4 +43,6 @@ class Project:
         project.time_signature = data.get("time_signature", [4, 4])
         project.bars = [float(value) for value in data.get("bars", []) or []]
         project.tracks = data.get("tracks", [])
+        project.timeline = data.get("timeline") or None
+        project.registry = data.get("registry") or None
         return project

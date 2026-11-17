@@ -62,11 +62,24 @@ from soniclab.core.bar_map import (
     insert_line,
     nearest_line,
     parse_clock,
-    position as bar_position,
     remove_line,
     set_span,
 )
 from soniclab.core.drums import pick_drum_track
+from soniclab.core.session_timeline import ORIGIN_DOWNBEATS, ORIGIN_MANUAL, ORIGIN_MIGRATED_DOWNBEATS, SessionTimeline
+from soniclab.core.track_registry import (
+    TRACK_ORIGINAL,
+    TRACK_SEGMENT,
+    TRACK_STEM,
+    ActionHistory,
+    PlaybackRegistry,
+    SelectionRegistry,
+    TrackRegistry,
+    block_frames,
+    block_id,
+    block_node,
+    is_block_id,
+)
 from soniclab.core.stems import (
     STATUS_CANCELLED as STEMS_CANCELLED,
     STATUS_OK as STEMS_OK,
@@ -97,7 +110,6 @@ from soniclab.core.beat_analysis import (
     STATUS_UNAVAILABLE,
 )
 from soniclab.core.beat_jobs import BeatJobQueue
-from soniclab.core.history import Edit, History
 from soniclab.core.project import Project
 from soniclab.core.recorder import Recorder, input_devices
 from soniclab.ui.browser import MediaBrowser
@@ -161,7 +173,8 @@ def sync_group(track) -> str:
     Stems of one split share their split's group; re-adding the same stem
     files (a cached split) joins that group too (see _add_stem_tracks).
     A track that was not split plays on the clock of its own file, shared
-    with every piece cut from it. Unrelated songs never share a clock."""
+    with every piece cut from it. Unrelated songs do not share a clock,
+    except the blocks of one selection, which do (unify_selection_groups)."""
     return stem_group(track) or f"file:{track.get('path') or id(track)}"
 
 
@@ -169,6 +182,29 @@ def loop_group(group: str) -> str:
     """The engine clock of a split's synced loop. Its stems loop together;
     the split's other stems keep the split's own clock."""
     return f"{group}/loop"
+
+
+def unify_selection_groups(groups: dict) -> None:
+    """Give one selection that spans several songs a single shared clock.
+
+    A selection that is already one song is left on that song's clock, so a
+    block started later still joins it. A synced loop stays on its own clock.
+    Anything not in this selection is not in ``groups`` and is not moved.
+    """
+    plain = [name for name, entry in groups.items() if entry[2] is None]
+    if len(plain) < 2:
+        return
+    members = {}
+    start = end = None
+    for name in plain:
+        song, found, _loop, last = groups.pop(name)
+        start = song if start is None else min(start, song)
+        end = last if end is None else max(end, last)
+        members.update(found)
+    tag = ",".join(f"{key[0]}:{key[1]}" for key in sorted(members))
+    groups[f"selection:{tag}"] = [start, members, None, end]
+
+
 FOLLOW_TIPS = {
     FOLLOW_OFF: "The canvas stays put; the playhead moves across it",
     FOLLOW_PAGE: "Scroll smoothly when the playhead reaches the right edge",
@@ -204,7 +240,6 @@ class MainWindow(QMainWindow):
             app.installEventFilter(self)
         self.engine = AudioEngine()
         self.project = Project()
-        self.history = History(self._sync_history)
         self.recorder = Recorder()
         self.beat_jobs = BeatJobQueue()
         self.onset_jobs = OnsetJobQueue()
@@ -248,6 +283,30 @@ class MainWindow(QMainWindow):
         self._last_frame = 0.0
         self._frames = 0
         self._frame_times = deque(maxlen=240)  # playhead frames, for the GUI frame rate
+        # The session's musical timeline: the one authority for bars, tempo
+        # and meter (see _sync_session). ``project.bars`` mirrors its bars
+        # in seconds for code not yet on it and for older project readers.
+        self.session_timeline = SessionTimeline()
+        # An old project whose bars followed the drum downbeats: they are
+        # frozen into the timeline once those downbeats are known.
+        self._freeze_drum_bars = False
+        # The arrangement's database (see soniclab.core.track_registry): every
+        # song, stem and segment by stable id, the selected ids, the segments
+        # the transport plays as a selection, and the recorded actions. Each
+        # track dict carries its node's id ("node_id"); _sync_registry keeps
+        # them in step while the rest of the window still works on tracks.
+        self.track_registry = TrackRegistry()
+        self.selection_registry = SelectionRegistry()
+        self.playback_registry = PlaybackRegistry()
+        self.action_history = ActionHistory()
+        # Selection playback through the transport: the blocks it plays, by
+        # track identity and bar (indices change), and the loop it set.
+        self._selection_play_ids: set[str] = set()
+        self._projecting = False  # drawing the registry's selection on the canvases
+        self._selection_play_loop = None
+        self._following_selection = False
+        self._selection_edit_pending = False
+        self._moved_ids: set[int] = set()  # tracks a drag just moved, by identity
         self._build_arrangement()
         self._build_transport()
         self._build_docks()
@@ -907,6 +966,7 @@ class MainWindow(QMainWindow):
                 lambda seconds, canvas=timeline.canvas: self._seek_on_canvas(canvas, seconds)
             )
             timeline.track_selected.connect(lambda index, view=timeline: self._on_view_selected(view, index))
+            timeline.selection_edited.connect(self._follow_selection)
             timeline.layout_changed.connect(self._canvas_layout_changed)
             timeline.bars_changed.connect(
                 lambda lines: self._set_bars(lines, "Bar line moved")
@@ -1285,6 +1345,7 @@ class MainWindow(QMainWindow):
                     "start": 0.0,
                     "duration": len(fields["_audio"]) / OUTPUT_RATE,
                     "stem_group": group,
+                    "stem_type": stem,
                     **fields,
                 }
             )
@@ -1474,6 +1535,7 @@ class MainWindow(QMainWindow):
         numerator, denominator = parse_time_signature(time_signature)
         self.project.bpm = bpm
         self.project.time_signature = [numerator, denominator]
+        self._sync_session()
         bars = self._bar_lines()
         if any(track_canvas(track) == 1 for track in self.project.tracks):
             self.splitter2.setVisible(True)
@@ -1498,6 +1560,9 @@ class MainWindow(QMainWindow):
             # Blocks were redrawn, maybe moved or cut: every playing block
             # voice must still match a block on screen, or stop.
             self._prune_previews()
+        self._sync_registry()
+        self._project_selection()  # the canvases show the registry's selection, at the new indices
+        self._refresh_selection_filter()
 
     def _canvas_layout_changed(self) -> None:
         # While _refresh_timeline rebuilds both canvases it lays the panels
@@ -1657,14 +1722,10 @@ class MainWindow(QMainWindow):
         self._refresh_browser()
 
     def _musical_position(self, seconds):
-        numerator, _denominator = parse_time_signature(self.signature.currentText())
-        bar, beat_in_bar = bar_position(
-            self.timeline.bar_lines,
-            float(seconds),
-            numerator,
-            self.timeline.bar_fallback,
-        )
-        return f"{bar:03d}.{beat_in_bar}"
+        """Bar and beat at ``seconds``, from the session timeline."""
+        timeline = self.session_timeline
+        position = timeline.tick_to_position(timeline.seconds_to_tick(max(0.0, float(seconds))))
+        return f"{max(0, position.bar):03d}.{position.beat}"
 
     def _sync_transport_lamp(self):
         playing = self.engine.playing
@@ -1790,6 +1851,8 @@ class MainWindow(QMainWindow):
             self.engine.preview_stop_all()
             self._preview_tracks.clear()
             self._sync_previews()
+        if self._selection_play_active():
+            self.playback_registry.resume()  # the selection plays on from the shared transport position
         try:
             self.engine.play()
         except Exception as exc:
@@ -1802,11 +1865,14 @@ class MainWindow(QMainWindow):
 
     def _pause(self):
         self.engine.pause()
+        self.playback_registry.pause()
         self._sync_transport_lamp()
         self._sync_canvas_play_buttons()
 
     def _stop(self):
-        # Stop is the panic button: the song and every stem block.
+        # Stop is the panic button: the song and every stem block. The
+        # selection's playback ends too; the selection itself stays.
+        self._stop_selection_play()
         self.engine.preview_stop_all()
         self._sync_previews()
         self.engine.stop()
@@ -1910,8 +1976,8 @@ class MainWindow(QMainWindow):
         return factor if factor > 0 else 1.0
 
     def _song_tempo(self) -> float | None:
-        """The song's tempo from its bar lines (placed or the drum
-        downbeats), or None when the bars are a plain tempo grid."""
+        """The song's tempo from the session's stored bars, or None when the
+        grid is regular from the tempo field."""
         lines = self._bar_lines()
         if len(lines) < 2:
             return None
@@ -1995,8 +2061,10 @@ class MainWindow(QMainWindow):
                     track[key] = float(track[key]) * ratio
             if track.get("downbeats"):
                 track["downbeats"] = [[float(time) * ratio, position_] for time, position_ in track["downbeats"]]
-        if self.project.bars:
-            self.project.bars = [round(float(time) * ratio, 6) for time in self.project.bars]
+        # Bars keep their ticks; the tempo map follows the stretched audio.
+        self._sync_session()
+        self.session_timeline.scale_tempo(1.0 / ratio)
+        self.project.bars = self.session_timeline.legacy_lines()
         if self._loop_bounds is not None:
             start, end = self._loop_bounds
             self._loop_bounds = (start * ratio, end * ratio)
@@ -2030,6 +2098,9 @@ class MainWindow(QMainWindow):
             + [first + bar]
         )
         count = int(np.ceil((end - first) / bar)) + 1
+        self._remember_edit()
+        self._sync_session()
+        self.session_timeline.reset_tempo(float(self.bpm.value()))  # one tempo, then even bars on it
         self._set_bars([first + bar * index for index in range(count)], f"Even bars at {self.bpm.value():.2f} BPM")
 
     def _with_progress(self, label: str, work):
@@ -2129,6 +2200,36 @@ class MainWindow(QMainWindow):
         else:
             self._select_track(index)
 
+    def _reselect_after_move(self, kept, moved, sources=(), pick: bool = False) -> None:
+        """After a move: the selection stays what it was, by track identity,
+        and the moved clips join it in their new place (picked block by
+        block with ``pick``, else selected whole). A move used to select only
+        the moved clip and drop everything else, on both canvases, so stems
+        selected before the drag were no longer played with it.
+
+        ``sources`` are tracks whose old picks named the blocks that moved
+        away; their picks are not carried over, nor the moved clips' own
+        old picks, whose bar numbers belong to where they were."""
+        dropped = {id(track) for track in moved} | {id(track) for track in sources}
+        self._moved_ids = {id(track) for track in moved}
+        self._restore_selection(kept, drop=dropped)
+        tracks = self.project.tracks
+        wanted = {id(track) for track in moved}
+        indices = [i for i, track in enumerate(tracks) if id(track) in wanted]
+        for index in indices:
+            view = self._view_for(index)
+            clip = view._clip_for(index)
+            if clip is None:
+                continue
+            if pick:
+                picks = view.picks()
+                picks[index] = {int(span[0]) for span in view._spans_of(clip)}
+                view.set_picks(picks)
+            else:
+                clip.setSelected(True)
+        if indices:
+            self._on_track_selected(min(indices))  # the clip commands act on it
+
     def _deselect_all(self) -> bool:
         """Clear the selected clips and picked blocks on both canvases, and
         stop the paused blocks (their grey tint and line go). Blocks still
@@ -2149,19 +2250,26 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _clear_selection(view) -> None:
-        """Deselect everything in ``view`` without reporting "no selection"."""
+        """Deselect everything in ``view`` without reporting "no selection".
+        Its block controls are refreshed all the same: with the signals
+        blocked, a shared ▶ would stay on a clip no longer selected, and a
+        click on it would play that clip alone instead of with the rest."""
         if view is None:
             return
         view.scene_obj.blockSignals(True)
         view.scene_obj.clearSelection()
         view.scene_obj.blockSignals(False)
+        view._update_combined_play()
         view.viewport().update()
 
     def _on_view_selected(self, view, index: int) -> None:
+        # Selecting on one canvas adds to the selection: the other canvas
+        # keeps its selected clips, as it keeps its picked blocks, so a clip
+        # moved there (selected by the drop) still plays with the stems
+        # selected here. _select_track still clears the other canvas when
+        # one track is chosen on its own.
         if index < 0 and view.peer is not None and view.peer.selected_indices():
-            return  # the selection moved to the other canvas
-        if index >= 0:
-            self._clear_selection(view.peer)
+            return  # the selection is on the other canvas
         self._on_track_selected(index)
 
     def _on_track_selected(self, index: int):
@@ -2514,6 +2622,7 @@ class MainWindow(QMainWindow):
         lane = tracks[index].get("lane")
         group = [i for i, track in enumerate(tracks) if i == index or (lane is not None and track.get("lane") == lane)]
         shift = 0.0 if start is None else max(0.0, float(start)) - float(tracks[index].get("start", 0.0) or 0.0)
+        kept = self._selection_by_track()
         self._remember_edit()
         for i in group:
             track = tracks[i]
@@ -2525,7 +2634,7 @@ class MainWindow(QMainWindow):
             self.engine.set_clip_start(i, track["start"])
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(index)
+        self._reselect_after_move(kept, [tracks[i] for i in group])
         where = "the second canvas" if canvas else "the main canvas"
         # Neither canvas scrolls: a transfer never moves the view under the user.
         self.statusBar().showMessage(f"Moved “{tracks[index].get('name', 'Track')}” to {where}", 3000)
@@ -2574,32 +2683,38 @@ class MainWindow(QMainWindow):
         canvas = target.canvas
         if canvas == 1 and not self.splitter2.isVisible():
             self._toggle_second_canvas(True)
+        kept = self._selection_by_track()
         self._remember_edit()
-        new_lanes: dict[int, int] = {}
-        for track in moving:
-            track["start"] = max(0.0, float(track.get("start", 0.0) or 0.0) + float(shift))
-            row = rows[id(track)]
-            if 0 <= row < len(hosts) and hosts[row] is not track:
-                self._join_row(track, hosts[row])
-                continue
-            # A new row: clips that land on the same new row share it.
-            if row not in new_lanes:
-                new_lanes[row] = self._lane_ids
-                self._lane_ids += 1
-            track["lane"] = new_lanes[row]
-            if canvas:
-                track["canvas"] = canvas
-            else:
-                track.pop("canvas", None)
-            tracks.pop(next(i for i, other in enumerate(tracks) if other is track))
-            tracks.append(track)
-        self._reload_engine()
-        self._commit_edit()
-        self._refresh_timeline()
+        try:
+            new_lanes: dict[int, int] = {}
+            for track in moving:
+                track["start"] = max(0.0, float(track.get("start", 0.0) or 0.0) + float(shift))
+                row = rows[id(track)]
+                if 0 <= row < len(hosts) and hosts[row] is not track:
+                    self._join_row(track, hosts[row])
+                    continue
+                # A new row: clips that land on the same new row share it.
+                if row not in new_lanes:
+                    new_lanes[row] = self._lane_ids
+                    self._lane_ids += 1
+                track["lane"] = new_lanes[row]
+                if canvas:
+                    track["canvas"] = canvas
+                else:
+                    track.pop("canvas", None)
+                tracks.pop(next(i for i, other in enumerate(tracks) if other is track))
+                tracks.append(track)
+            self._reload_engine()
+            self._commit_edit()
+            self._refresh_timeline()
+        except Exception:
+            self._abandon_edit()
+            raise
         grabbed_track = moving[indices.index(grabbed)] if grabbed in indices else None
         if grabbed_track is not None:
-            index = next(i for i, other in enumerate(tracks) if other is grabbed_track)
-            self._select_track(index)  # dropped where the user can see it: no scroll
+            # Dropped where the user can see it: no scroll. The clips moved
+            # join the selection there; what else was selected stays so.
+            self._reselect_after_move(kept, moving)
         where = "the second canvas" if canvas else "the main canvas"
         count = len(moving)
         self.statusBar().showMessage(
@@ -2630,7 +2745,18 @@ class MainWindow(QMainWindow):
         for index, local_start, local_duration, bar in blocks:
             grouped.setdefault(int(index), []).append((float(local_start), float(local_duration), int(bar)))
         self._remember_edit()
-        pieces = []  # (piece, relative row)
+        try:
+            self._move_block_pieces(
+                tracks, grouped, source_rows, base, hosts, target_row, shift, canvas, target
+            )
+        except Exception:
+            self._abandon_edit()
+            raise
+
+    def _move_block_pieces(self, tracks, grouped, source_rows, base, hosts, target_row, shift, canvas, target) -> None:
+        kept = self._selection_by_track()
+        sources = [tracks[index] for index in grouped]
+        pieces = []  # (piece, relative row, whole)
         replaced = {}  # id(track) -> remaining segments
         for index, items in grouped.items():
             track = tracks[index]
@@ -2640,8 +2766,11 @@ class MainWindow(QMainWindow):
             offset = float(track.get("offset", 0.0) or 0.0)
             duration = float(track.get("duration", 0.0) or 0.0)
             items.sort()
-            if len(items) == 1 and items[0][0] <= 0.05 and items[0][1] >= duration - 0.05:
-                pieces.append((track, relative, True))  # the whole clip is this bar
+            # The whole clip moves as that same item. One bar of it moves
+            # alone; the rest of the track stays.
+            whole_clip = len(items) == 1 and items[0][0] <= 0.05 and items[0][1] >= duration - 0.05
+            if whole_clip or track.get("bar_block"):
+                pieces.append((track, relative, True))
                 continue
             for local_start, local_duration, bar in items:
                 piece = dict(track)
@@ -2652,8 +2781,8 @@ class MainWindow(QMainWindow):
                 piece["bar_block"] = True
                 piece["name"] = f"{track.get('name', 'Audio')} · bar {bar + 1}"
                 piece.pop("lane", None)
+                piece.pop("splits", None)
                 pieces.append((piece, relative, False))
-            # What is left of the track around the bars taken out.
             segments = []
             cursor = 0.0
             for local_start, local_duration, _bar in items:
@@ -2663,7 +2792,6 @@ class MainWindow(QMainWindow):
             if duration - cursor >= 0.05:
                 segments.append((cursor, duration - cursor))
             replaced[id(track)] = (track, segments, start, offset)
-        # Rebuild the track list with the remaining segments in place.
         rebuilt = []
         for track in tracks:
             entry = replaced.get(id(track))
@@ -2672,7 +2800,7 @@ class MainWindow(QMainWindow):
                 continue
             track, segments, start, offset = entry
             if not segments:
-                continue  # every bar of it was taken
+                continue
             lane = track.get("lane")
             if len(segments) > 1 and lane is None:
                 lane = self._lane_ids
@@ -2686,6 +2814,7 @@ class MainWindow(QMainWindow):
                     part["lane"] = lane
                 if number:
                     part["armed"] = False
+                    part.pop("splits", None)
                 rebuilt.append(part)
         tracks[:] = rebuilt
         new_lanes: dict[int, int] = {}
@@ -2712,12 +2841,9 @@ class MainWindow(QMainWindow):
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        indices = {next(i for i, other in enumerate(tracks) if other is piece) for piece in moved}
-        for view in self._timelines():
-            view.set_picks({})
-        target.pick_whole_clips(indices)
-        first = min(indices)
-        self._select_track(first)  # dropped where the user can see it: no scroll
+        # The moved bars stay picked in their new place, beside whatever else
+        # was selected; dropped where the user can see it: no scroll.
+        self._reselect_after_move(kept, moved, sources, pick=True)
         count = len(moved)
         where = "canvas 2" if canvas else "the main canvas"
         self.statusBar().showMessage(f"Moved {count} bar{'s' if count != 1 else ''} on {where}", 3000)
@@ -3029,6 +3155,14 @@ class MainWindow(QMainWindow):
         self._remember_edit()
         self.engine.clear_clips()
         self.project = Project()
+        self.session_timeline = SessionTimeline()
+        self._freeze_drum_bars = False
+        self._stop_selection_play()
+        self.track_registry = TrackRegistry()
+        self.selection_registry = SelectionRegistry()
+        self.playback_registry = PlaybackRegistry()
+        self.action_history = ActionHistory()
+        self._sync_history()
         self.current_path = None
         self._selected = -1
         for timeline in self._timelines():
@@ -3068,7 +3202,15 @@ class MainWindow(QMainWindow):
         saved_project.name = self.project.name
         saved_project.bpm = float(self.bpm.value())
         saved_project.time_signature = [numerator, denominator]
-        saved_project.bars = list(self.project.bars)
+        self._sync_session()
+        saved_project.timeline = self.session_timeline.to_dict()
+        saved_project.bars = self.session_timeline.legacy_lines()  # for older SonicLab builds
+        self._sync_registry()
+        serial_tracks = [
+            {key: value for key, value in track.items() if not key.startswith("_")}
+            for track in self.project.tracks
+        ]  # again: the sync gave every track its node id
+        saved_project.registry = {"tracks": self.track_registry.to_dict(), "history": self.action_history.to_dict()}
         saved_project.tracks = serial_tracks
         self.project.bpm = saved_project.bpm
         self.project.time_signature = saved_project.time_signature
@@ -3157,6 +3299,8 @@ class MainWindow(QMainWindow):
             self.bpm.blockSignals(False)
             self.signature.blockSignals(False)
             self._remember_path(path)
+            self._open_session_timeline()
+            self._open_registry()
             self._refresh_timeline()
             if self._selected >= 0:
                 # Point at it; a whole selected stem would trade its own ▶ for the shared one.
@@ -3215,15 +3359,30 @@ class MainWindow(QMainWindow):
             return [self._selected]
         return []
 
+    @property
+    def history(self) -> ActionHistory:
+        """The project's one undo history (saved with it)."""
+        return self.action_history
+
+    # In-memory track fields an edit can change and undo must restore. The
+    # other "_" fields (audio, analysis caches) are rebuilt, not recorded.
+    _RECORDED_RUNTIME = ("_alignment",)
+
     def _snapshot(self) -> dict:
+        """The project as an edit leaves it, in a form that can be saved:
+        tracks without their audio (see _with_runtime)."""
         return {
-            "tracks": [dict(track) for track in self.project.tracks],
+            "tracks": [
+                {key: value for key, value in track.items() if not key.startswith("_") or key in self._RECORDED_RUNTIME}
+                for track in self.project.tracks
+            ],
             "master_gain": self.engine.output_gain,
             "master_muted": self.engine.master_muted,
             "bpm": float(self.bpm.value()),
             "signature": self.signature.currentText(),
             "name": self.project.name,
             "bars": list(self.project.bars),
+            "timeline": self.session_timeline.to_dict(),
         }
 
     def _snapshot_changed(self, before: dict, after: dict) -> bool:
@@ -3234,6 +3393,7 @@ class MainWindow(QMainWindow):
             or before["signature"] != after["signature"]
             or before["name"] != after["name"]
             or before.get("bars") != after.get("bars")
+            or before.get("timeline") != after.get("timeline")
             or len(before["tracks"]) != len(after["tracks"])
         ):
             return True
@@ -3260,6 +3420,10 @@ class MainWindow(QMainWindow):
             "stretch",
             "stem_group",
             "stem_loop",
+            "bars",
+            "splits",
+            "node_id",
+            "_alignment",
         )
         for left, right in zip(before["tracks"], after["tracks"]):
             for key in keys:
@@ -3267,10 +3431,43 @@ class MainWindow(QMainWindow):
                     return True
         return False
 
+    def _with_runtime(self, tracks) -> list[dict]:
+        """Tracks from a recorded snapshot, with their in-memory fields
+        (audio, analysis) back: from the track with the same node id or
+        file now in the project, else read from disk as a load does."""
+        current = self.project.tracks
+        by_node = {track.get("node_id"): track for track in current if track.get("node_id")}
+        by_path = {track.get("path"): track for track in current if track.get("path")}
+        for track in tracks:
+            if track.get("_audio") is not None:
+                continue
+            donor = by_node.get(track.get("node_id")) or by_path.get(track.get("path"))
+            if donor is not None:
+                for key, value in donor.items():
+                    if key.startswith("_") and key not in self._RECORDED_RUNTIME and key not in track:
+                        track[key] = value
+                continue
+            source = track.get("path")
+            audio = np.zeros((1, 2), dtype=np.float32)
+            if source and os.path.exists(source):
+                try:
+                    raw, rate = sf.read(source, dtype="float32", always_2d=True)
+                    audio = AudioEngine.resample(raw, rate)
+                except Exception:
+                    pass
+            factor = self._stretch_of(track)
+            if factor != 1.0 and len(audio) > 1:
+                track["_source_audio"] = audio
+                audio = stretch_audio(audio, factor)
+            track["_audio"] = audio
+        return tracks
+
     def _remember_edit(self) -> None:
         if self._history_frozen or self._gesture_before is not None:
             return
         self._gesture_before = self._snapshot()
+        self._gesture_actions = self.action_history.done
+        self.action_history.begin()  # what this gesture records is one undo step
 
     def _commit_edit(self) -> None:
         if self._history_frozen or self._gesture_before is None:
@@ -3278,22 +3475,37 @@ class MainWindow(QMainWindow):
         before = self._gesture_before
         self._gesture_before = None
         after = self._snapshot()
-        if not self._snapshot_changed(before, after):
+        recorded = self.action_history.recorded_since(getattr(self, "_gesture_actions", self.action_history.done))
+        if self._snapshot_changed(before, after) or recorded > 0:
+            # One gesture, one undo step: the project before and after it,
+            # with any registry actions it recorded (a split) in its group.
+            self.action_history.record_edit(before, after)
+        self.action_history.end()
+        self._sync_history()
+
+    def _abandon_edit(self) -> None:
+        """A transfer that failed before it was committed: put the tracks back."""
+        snap = self._gesture_before
+        if snap is None:
             return
-        self.history.push(
-            Edit(
-                lambda: self._restore_snapshot(before),
-                lambda: self._restore_snapshot(after),
-            )
-        )
+        self._gesture_before = None
+        # Registry actions it recorded are taken back and dropped, so the
+        # history never holds half an edit.
+        while self.action_history.recorded_since(getattr(self, "_gesture_actions", self.action_history.done)) > 0:
+            self.action_history.undo(self.track_registry)
+            del self.action_history.actions[self.action_history.done:]
+        self.action_history.end()
+        self._restore_snapshot(snap)
 
     def _restore_snapshot(self, snap: dict) -> None:
         self._history_frozen = True
         self._gesture_before = None
         try:
-            self.project.tracks = [dict(item) for item in snap["tracks"]]
+            self.project.tracks = self._with_runtime([dict(item) for item in snap["tracks"]])
             self.project.name = snap.get("name") or "Untitled"
             self.project.bars = list(snap.get("bars") or [])
+            if snap.get("timeline"):
+                self.session_timeline = SessionTimeline.from_dict(snap["timeline"])
             self.engine.set_output_gain(snap.get("master_gain", 1.0))
             self.engine.set_master_muted(snap.get("master_muted", False))
             self.mixer.set_master_gain(snap.get("master_gain", 1.0))
@@ -3320,16 +3532,30 @@ class MainWindow(QMainWindow):
             self._history_frozen = False
 
     def _undo(self) -> None:
-        self.history.undo()
+        """Undo the last gesture: its registry actions (the same node ids
+        come back) and the project as it was before it."""
+        undone = self.action_history.undo(self.track_registry)
+        edit = next((action for action in undone if action.snapshot_before is not None), None)
+        if edit is not None:
+            self._restore_snapshot(edit.snapshot_before)
+        elif undone:
+            self._refresh_timeline()
+        self._sync_history()
 
     def _redo(self) -> None:
-        self.history.redo()
+        redone = self.action_history.redo(self.track_registry)
+        edit = next((action for action in redone if action.snapshot_after is not None), None)
+        if edit is not None:
+            self._restore_snapshot(edit.snapshot_after)
+        elif redone:
+            self._refresh_timeline()
+        self._sync_history()
 
     def _sync_history(self) -> None:
         if not hasattr(self, "undo_action"):
             return
-        self.undo_action.setEnabled(self.history.can_undo)
-        self.redo_action.setEnabled(self.history.can_redo)
+        self.undo_action.setEnabled(self.action_history.can_undo)
+        self.redo_action.setEnabled(self.action_history.can_redo)
 
     def _signature_changed(self, text: str) -> None:
         first = self._gesture_before is None and not self._history_frozen
@@ -3431,7 +3657,21 @@ class MainWindow(QMainWindow):
         if local_end - local_start < 0.05 or duration <= 0:
             return
         self._remember_edit()
-        if local_end - local_start >= duration - 0.05:
+        try:
+            self._apply_block_move(
+                track, index, start, offset, duration, local_start, local_end,
+                new_start, share_lane, insert_at, bar, canvas, host,
+            )
+        except Exception:
+            self._abandon_edit()
+            raise
+
+    def _apply_block_move(
+        self, track, index, start, offset, duration, local_start, local_end,
+        new_start, share_lane, insert_at, bar, canvas, host,
+    ) -> None:
+        kept = self._selection_by_track()
+        if track.get("bar_block") or local_end - local_start >= duration - 0.05:
             track["start"] = max(0.0, float(new_start))
             if canvas is not None:
                 if canvas:
@@ -3442,15 +3682,17 @@ class MainWindow(QMainWindow):
             self.engine.set_clip_start(index, track["start"])
             self._commit_edit()
             self._refresh_timeline()
-            self._select_track(index)
+            self._reselect_after_move(kept, [track])
             return
+        # Only this bar leaves. The audio stays the same array; nothing is
+        # written out. The rest of the track stays on its row.
         piece = dict(track)
         piece["start"] = max(0.0, float(new_start))
         piece["offset"] = offset + local_start
         piece["duration"] = local_end - local_start
         piece["armed"] = False
-        # One block from now on, wherever it lands; see TimelineView._place_bar_blocks.
         piece["bar_block"] = True
+        piece.pop("splits", None)
         if canvas is not None:
             if canvas:
                 piece["canvas"] = int(canvas)
@@ -3467,6 +3709,7 @@ class MainWindow(QMainWindow):
             tail["offset"] = offset + local_end
             tail["duration"] = tail_length
             tail["armed"] = False
+            tail.pop("splits", None)
         elif head < 0.05:
             track["start"] = start + local_end
             track["offset"] = offset + local_end
@@ -3489,7 +3732,6 @@ class MainWindow(QMainWindow):
             piece.pop("lane", None)
         if share_lane:
             self.project.tracks.insert(index + 1, piece)
-            piece_index = index + 1
             if tail is not None:
                 self.project.tracks.insert(index + 2, tail)
         else:
@@ -3501,13 +3743,12 @@ class MainWindow(QMainWindow):
             if insert_at == index:
                 insert_at = index + 1
             self.project.tracks.insert(insert_at, piece)
-            piece_index = insert_at
         if host is not None:
-            piece_index = self._join_row(piece, host)
+            self._join_row(piece, host)
         self._reload_engine()
         self._commit_edit()
         self._refresh_timeline()
-        self._select_track(piece_index)
+        self._reselect_after_move(kept, [piece], [track])
         self.statusBar().showMessage(f"Moved bar {int(bar) + 1}", 2000)
 
     def _keep_stem_grid(self, track: dict) -> None:
@@ -3525,7 +3766,9 @@ class MainWindow(QMainWindow):
         if len(own) >= 2:
             track["bars"] = sorted(round(time, 6) for time in own)
             return
-        view = self._view_for(self.project.tracks.index(track)) if track in self.project.tracks else self.timeline
+        # By identity: comparing track dicts compares their audio arrays.
+        index = next((i for i, other in enumerate(self.project.tracks) if other is track), None)
+        view = self._view_for(index) if index is not None else self.timeline
         lines = view.bar_lines
         if len(lines) < 2:
             return
@@ -3558,12 +3801,35 @@ class MainWindow(QMainWindow):
         self._refresh_timeline()
         self.statusBar().showMessage("This stem follows the song's bars again", 3000)
 
+    def _mark_block_edges(self, track: dict, *file_times: float) -> None:
+        """Mark block edges on ``track``, in its audio-file time.
+
+        The track stays the one clip it is: same audio, same name. A time
+        inside the clip becomes a block edge (``track["splits"]``). Nothing
+        is copied and nothing is written to disk.
+        """
+        offset = float(track.get("offset", 0.0) or 0.0)
+        duration = float(track.get("duration", 0.0) or 0.0)
+        if track.get("bar_block"):
+            # Drawn as one block until it has marks. The marks cut it.
+            track.pop("bar_block", None)
+            track["bars"] = [round(offset, 6), round(offset + duration, 6)]
+        else:
+            self._keep_stem_grid(track)
+        marks = {round(float(mark), 6) for mark in track.get("splits") or ()}
+        lo = offset + 1e-3
+        hi = offset + duration - 1e-3
+        for raw in file_times:
+            mark = round(float(raw), 6)
+            if lo < mark < hi:
+                marks.add(mark)
+        track["splits"] = sorted(marks)
+
     def _split_selected(self) -> None:
         index = self._selected
         if not (0 <= index < len(self.project.tracks)):
             return
         track = self.project.tracks[index]
-        self._keep_stem_grid(track)
         start = float(track.get("start", 0.0))
         duration = float(track.get("duration", 0.0) or 0.0)
         local = float(self.engine.position) - start
@@ -3572,25 +3838,21 @@ class MainWindow(QMainWindow):
                 "Move the playhead inside the clip to split", 3000
             )
             return
-        kept = self._selection_by_track()
         self._remember_edit()
-        tail = dict(track)
-        tail["start"] = start + local
-        tail["offset"] = float(track.get("offset", 0.0) or 0.0) + local
-        tail["duration"] = duration - local
-        tail["armed"] = False
-        track["duration"] = local
-        self.project.tracks.insert(index + 1, tail)
-        self._reload_engine()
+        offset = float(track.get("offset", 0.0) or 0.0)
+        self._mark_block_edges(track, offset + local)
         self._commit_edit()
         self._refresh_timeline()
-        self._select_after_split(kept, index, drop={id(track)}, select=False)
+        name = track.get("name", "Track")
+        self.statusBar().showMessage(f"“{name}” stays one track. Marked a block edge at {offset + local:.2f} s", 2500)
 
     def _split_stem_in_half(self, index: int, local_start: float = 0.0, local_duration: float = -1.0) -> None:
-        """Cut the block under the scissor in half, on the same row, in place.
+        """Cut the block under the scissor in half: a mark on the same track.
 
-        The two halves stay where that block was. The rest of the stem stays
-        on that row too, and still plays one bar at a time.
+        The track stays one track (one clip, one name, the same audio); the
+        mark, kept in its audio-file time (``track["splits"]``), is a block
+        edge, so the block shows as two, each with its own ▶ and each its own
+        voice. Nothing is copied or written to disk.
         """
         tracks = self.project.tracks
         index = int(index)
@@ -3605,58 +3867,47 @@ class MainWindow(QMainWindow):
         region_start = max(0.0, min(duration, float(local_start)))
         region_end = max(region_start, min(duration, region_start + float(local_duration)))
         if region_end - region_start <= 0.12:
-            self.statusBar().showMessage("This stem is too short to split in half", 3000)
+            self.statusBar().showMessage("This block is too short to split in half", 3000)
             return
         mid = (region_start + region_end) / 2.0
         if mid - region_start <= 0.05 or region_end - mid <= 0.05:
-            self.statusBar().showMessage("This stem is too short to split in half", 3000)
+            self.statusBar().showMessage("This block is too short to split in half", 3000)
             return
-        kept = self._selection_by_track()
+        view = self._view_for(index)
+        # The block's identity as the selection may hold it (selection is by
+        # identity, so the mark renumbering the blocks after it is harmless).
+        bar_here = view.block_at_time(index, start + region_start + 1e-4)
+        before_identity = self._block_identity(index, bar_here) if bar_here is not None else None
         self._remember_edit()
-        name = track.get("name", "Track")
+        mark = round(offset + mid, 6)
+        # In the Track Registry, before the mark renumbers the blocks: the
+        # exact block (its segment, made now if it was never needed) is split
+        # at the mark's source frame into two segments with ids of their own.
+        block = self._segment_of_block(index, start + region_start, start + region_end)
+        self._mark_block_edges(track, mark)
+        if block is not None:
+            timeline = self.session_timeline
 
-        def half(local_a: float, local_b: float) -> dict:
-            piece = dict(track)
-            piece["start"] = start + local_a
-            piece["offset"] = offset + local_a
-            piece["duration"] = local_b - local_a
-            piece["armed"] = False
-            piece["bar_block"] = True
-            piece["name"] = name
-            piece["lane"] = lane
-            return piece
+            def frame_to_tick(frame, track=track):
+                seconds = float(track.get("start", 0.0) or 0.0) + frame / OUTPUT_RATE - float(track.get("offset", 0.0) or 0.0)
+                return round(timeline.seconds_to_tick(seconds))
 
-        lane = track.get("lane")
-        if lane is None:
-            lane = self._lane_ids
-            self._lane_ids += 1
-        left = half(region_start, mid)
-        right = half(mid, region_end)
-        segments = []
-        if region_start >= 0.05:
-            segments.append((0.0, region_start))
-        if duration - region_end >= 0.05:
-            segments.append((region_end, duration - region_end))
-        remainders = []
-        for number, (local_a, length) in enumerate(segments):
-            part = track if number == 0 else dict(track)
-            part["start"] = start + local_a
-            part["offset"] = offset + local_a
-            part["duration"] = length
-            part.pop("bar_block", None)
-            if lane is not None:
-                part["lane"] = lane
-            if number:
-                part["armed"] = False
-            remainders.append(part)
-        tracks[index:index + 1] = remainders + [left, right]
-        self._reload_engine()
+            action = self.action_history.split(
+                self.track_registry, block.id, [int(round(mark * OUTPUT_RATE))], frame_to_tick
+            )
+            # Through the action's result: a selected block that was split is
+            # selected as its two halves.
+            ids = self.selection_registry.ids
+            for old in {before_identity, block.id}:
+                if old in ids:
+                    at = ids.index(old)
+                    ids[at : at + 1] = [child for child in action.created if child not in ids]
+            self.selection_registry.replace(ids)
         self._commit_edit()
-        self._refresh_timeline()
-        self._select_after_split(
-            kept, next(i for i, other in enumerate(self.project.tracks) if other is left), drop={id(track)}, select=False
-        )
-        self.statusBar().showMessage(f"Split “{name}” into two tracks", 2000)
+        self._refresh_timeline()  # draws the selection from the registry; voices follow their blocks
+        self._on_track_selected(index)
+        name = track.get("name", "Track")
+        self.statusBar().showMessage(f"Split a block of “{name}” in half at {offset + mid:.2f} s", 2000)
 
     def _duplicate_selected(self) -> None:
         indices = self._selection()
@@ -4050,14 +4301,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No confident onset matches to nudge", 4000)
             return
 
-        def apply(value, track_index=index):
-            if not (0 <= track_index < len(self.project.tracks)):
-                return
-            self.project.tracks[track_index]["_alignment"] = float(value)
-            self._apply_onsets()
-
-        apply(updated)
-        self.history.push(Edit(lambda: apply(before), lambda: apply(updated)))
+        self._remember_edit()
+        track["_alignment"] = float(updated)  # recorded in the edit (see _RECORDED_RUNTIME)
+        self._commit_edit()
+        self._apply_onsets()
         delta = updated - before
         self.statusBar().showMessage(f"Nudged by {delta * 1000:+.0f} ms", 4000)
 
@@ -4215,22 +4462,90 @@ class MainWindow(QMainWindow):
         return lines if len(lines) >= 2 else []
 
     def _bar_lines(self) -> list[float]:
-        """Bar lines the user placed, else the drum downbeats.
+        """The session timeline's stored bars as bar-line seconds, for the
+        canvases (compatibility adapter while they still work in seconds).
 
-        Empty means the timeline draws evenly spaced bars from the tempo.
+        Empty means the grid is regular from the tempo and meter. Detected
+        downbeats never make bars here: analysis does not change the grid.
         """
-        if self.project.bars:
-            return list(self.project.bars)
-        return self._drum_bar_lines()
+        self._sync_session()
+        return self.session_timeline.legacy_lines()
+
+    def _sync_session(self) -> None:
+        """Keep the timeline and the fields that feed it in step.
+
+        The BPM field is the session tempo while no tempo map is stored; the
+        time signature is the default meter (stored bars keep their own).
+        ``project.bars`` changed outside the timeline (older code, a test, a
+        project from before it) is taken in, as an old project's bars are."""
+        timeline = self.session_timeline
+        numerator, denominator = parse_time_signature(self.signature.currentText())
+        timeline.session.numerator, timeline.session.denominator = numerator, denominator
+        if not timeline.tempos and abs(timeline.session.bpm - float(self.bpm.value())) > 1e-9:
+            timeline.session.bpm = float(self.bpm.value())
+            timeline._changed()
+        legacy = [round(float(value), 6) for value in self.project.bars or ()]
+        if legacy != timeline.legacy_lines():
+            self.session_timeline = SessionTimeline.from_legacy_lines(
+                legacy, float(self.bpm.value()), numerator, denominator
+            ) if len(legacy) >= 2 else SessionTimeline(timeline.session)
+            self.project.bars = self.session_timeline.legacy_lines()
+
+    def _open_session_timeline(self) -> None:
+        """A loaded project's timeline: as saved, or migrated from an older
+        project's bar lines. An old project whose bars followed the drum
+        downbeats has them frozen in (now, or when the downbeats are known),
+        so it looks as it did; after that, analysis never moves its bars."""
+        numerator, denominator = parse_time_signature(self.signature.currentText())
+        bpm = float(self.bpm.value())
+        self._freeze_drum_bars = False
+        if self.project.timeline:
+            self.session_timeline = SessionTimeline.from_dict(self.project.timeline)
+        elif len(self.project.bars or ()) >= 2:
+            self.session_timeline = SessionTimeline.from_legacy_lines(self.project.bars, bpm, numerator, denominator)
+        else:
+            self.session_timeline = SessionTimeline()
+            self.session_timeline.session.bpm = bpm
+            self._freeze_drum_bars = True
+            self._follow_drum_bars()
+        self.project.bars = self.session_timeline.legacy_lines()
+
+    def _open_registry(self) -> None:
+        """A loaded project's Track Registry and action history, as saved.
+        An older project has none: its tracks get nodes on the next sync.
+        Selection and playback are not restored: no voice starts by itself."""
+        self._stop_selection_play()
+        saved = self.project.registry or {}
+        self.track_registry = TrackRegistry.from_dict(saved.get("tracks"))
+        self.action_history = ActionHistory.from_dict(saved.get("history"))
+        self._sync_history()  # undo after reopening undoes the last saved action
+        self.selection_registry = SelectionRegistry()
+        self.playback_registry = PlaybackRegistry()
 
     def _follow_drum_bars(self) -> None:
-        # Bars that follow the drums move when the drum downbeats change.
-        if not self.project.bars and self.timeline.bar_map != self._drum_bar_lines():
-            self._refresh_timeline()
+        """Detected downbeats changed. They never move the session's bars;
+        only an old project still waiting for its drum bars takes them in,
+        once (see _open_session_timeline)."""
+        if not self._freeze_drum_bars:
+            return
+        lines = self._drum_bar_lines()
+        if len(lines) < 2:
+            return
+        self._freeze_drum_bars = False
+        numerator, denominator = parse_time_signature(self.signature.currentText())
+        self.session_timeline = SessionTimeline.from_legacy_lines(
+            lines, float(self.bpm.value()), numerator, denominator, origin=ORIGIN_MIGRATED_DOWNBEATS
+        )
+        self.project.bars = self.session_timeline.legacy_lines()
+        self._refresh_timeline()
 
-    def _set_bars(self, lines, message: str) -> None:
+    def _set_bars(self, lines, message: str, origin: str = ORIGIN_MANUAL) -> None:
+        """New bar lines (seconds, from the ruler and bar commands) into the
+        session timeline, through its tempo map. Empty: the regular grid."""
         self._remember_edit()
-        self.project.bars = [round(float(value), 6) for value in lines]
+        self._sync_session()
+        self.session_timeline.set_bar_lines_seconds(lines, origin)
+        self.project.bars = self.session_timeline.legacy_lines()
         self._commit_edit()
         self._refresh_timeline()
         self.statusBar().showMessage(message, 4000)
@@ -4333,11 +4648,11 @@ class MainWindow(QMainWindow):
                 "No drum downbeats yet. Mark a drum track and analyze it", 5000
             )
             return
-        self._set_bars(lines, f"Marked {len(lines) - 1} bars at the drum downbeats")
+        # The user's command: detected downbeats become bars because they ask.
+        self._set_bars(lines, f"Marked {len(lines) - 1} bars at the drum downbeats", ORIGIN_DOWNBEATS)
 
     def _reset_bars(self) -> None:
-        follows = "the drum downbeats" if self._drum_bar_lines() else "the tempo"
-        self._set_bars([], f"Bars follow {follows}")
+        self._set_bars([], "Bars follow the tempo and time signature")
 
     def _bar_bounds(self, index: int) -> tuple[float, float] | None:
         lines, fallback = self.timeline.bar_lines, self.timeline.bar_fallback
@@ -4376,6 +4691,9 @@ class MainWindow(QMainWindow):
     # plays its own stretch of the song (a shift on the clock) and loops on
     # its own length, so blocks started together sound together, a block
     # started later joins at the clock's place, and none waits for another.
+    # A selection that spans more than one song is the exception: those
+    # blocks share one clock for that play (see unify_selection_groups).
+    # A song's own clock is left where it is for anything not selected.
     # A mute keeps the voice on the clock, silent, so unmuting lands on the
     # song's current place. Picked bars side by side on one clip play as one
     # block (a run): one voice, keyed by the first bar. Separate clips, the
@@ -4413,7 +4731,7 @@ class MainWindow(QMainWindow):
         # its blocks still picked: the loop is the one the user just made.
         synced = 0 <= track < len(self.project.tracks) and stem_loop(self.project.tracks[track]) is not None
         if (track, bar) in chosen_blocks and len(chosen_blocks) > 1 and not synced:
-            self._toggle_combined_loop(chosen_blocks)
+            self._toggle_selection_play(chosen_blocks)
             return
         states = self.engine.previews()
         key = self._block_voice(track, bar, states)
@@ -4450,74 +4768,411 @@ class MainWindow(QMainWindow):
         self._start_blocks([(track, bar)])
 
     def _selected_blocks(self) -> list[tuple[int, int]]:
-        """Every selected block, ``(track, bar)``: the picked blocks, and all
-        the blocks of a track that is selected as a whole."""
-        found = []
+        """Every selected block, ``(track, bar)``, from the Selection
+        Registry: its blocks, and every block of a track selected whole (a
+        parent resolves to its blocks)."""
+        found = set()
+        for identity in self.selection_registry.ids:
+            if is_block_id(identity) or self._node_track(identity) is None:
+                block = self._identity_block(identity)
+                if block is not None:
+                    found.add(block)
+                continue
+            index = self._node_track(identity)
+            view = self._view_for(index)
+            clip = view._clip_for(index)
+            if clip is not None:
+                found.update((index, int(span[0])) for span in view._spans_of(clip))
+        return sorted(found)
+
+    # -- stable identities -----------------------------------------------------
+    # The Selection Registry holds identities, never track indices: a block's
+    # identity (block_id: its track's node and its source frames, or the
+    # node id of a segment a split made) and a whole track's node id. Indices
+    # and bar numbers are worked out from them when needed.
+
+    def _node_track(self, node_id) -> int | None:
+        """The index of the track whose node is ``node_id``, or None."""
+        for index, track in enumerate(self.project.tracks):
+            if track.get("node_id") == node_id:
+                return index
+        return None
+
+    def _block_identity(self, index: int, bar: int) -> str | None:
+        """The stable identity of one block: a split result's own node id,
+        else its track's node and its source frames."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return None
+        times = self._view_for(index).block_times(index, bar)
+        node = self.track_registry.get(tracks[index].get("node_id"))
+        if times is None or node is None:
+            return None
+        track = tracks[index]
+        clip_start = float(track.get("start", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        first = int(round((offset + float(times[0]) - clip_start) * OUTPUT_RATE))
+        last = int(round((offset + float(times[1]) - clip_start) * OUTPUT_RATE))
+        for child in self.track_registry.descendants(node.id):
+            if child.source_start_frame == first and child.source_end_frame == last:
+                return child.id
+        return block_id(node.id, first, last)
+
+    def _identity_block(self, identity: str) -> tuple[int, int] | None:
+        """``(track, bar)`` of a block identity now, or None if no block
+        on any track is that stretch any more."""
+        registry = self.track_registry
+        if is_block_id(identity):
+            owner = block_node(identity)
+            first, last = block_frames(identity)
+        else:
+            node = registry.get(identity)
+            if node is None or not node.active:
+                return None
+            first, last = node.source_start_frame, node.source_end_frame
+            owner = node.id
+            while owner is not None and self._node_track(owner) is None:
+                owner = registry.get(owner).parent_id if registry.get(owner) else None
+            if owner is None:
+                return None
+        family = {owner} | {child.id for child in registry.descendants(owner)}
+        for index, track in enumerate(self.project.tracks):
+            if track.get("node_id") not in family:
+                continue
+            clip_start = float(track.get("start", 0.0) or 0.0)
+            offset = float(track.get("offset", 0.0) or 0.0)
+            at = clip_start + first / OUTPUT_RATE - offset
+            view = self._view_for(index)
+            bar = view.block_at_time(index, at + 1e-4)
+            if bar is None:
+                continue
+            times = view.block_times(index, bar)
+            if times is not None and abs((offset + float(times[1]) - clip_start) * OUTPUT_RATE - last) <= 2:
+                return index, bar
+        return None
+
+    def _selection_from_views(self) -> None:
+        """A selection edit on a canvas, by any means, into the Selection
+        Registry (the authority): picked blocks by block identity, clips
+        selected whole by their node id."""
+        if self._projecting:
+            return
+        ids = []
         for view in self._timelines():
             picks = view.picks()
-            for index, bars in picks.items():
-                found.extend((index, bar) for bar in sorted(bars))
+            for index, bars in sorted(picks.items()):
+                for bar in sorted(bars):
+                    identity = self._block_identity(index, bar)
+                    if identity is not None:
+                        ids.append(identity)
             for index in view.selected_indices():
-                if index in picks:
-                    continue
-                clip = view._clip_for(index)
-                if clip is not None:
-                    found.extend((index, int(span[0])) for span in view._spans_of(clip))
-        return sorted(set(found))
+                if index not in picks and 0 <= index < len(self.project.tracks):
+                    node_id = self.project.tracks[index].get("node_id")
+                    if node_id:
+                        ids.append(node_id)
+        self.selection_registry.replace(ids)
+        self.playback_registry.reconcile_selection(self.selection_registry)
 
-    def _toggle_combined_loop(self, blocks) -> None:
-        """The selected blocks as one loop: each on its song's clock, all
-        starting together and each looping its own stretch, so they stay in
-        step. ⏸ pauses them all; ▶ plays them on from there, still in step."""
-        blocks = list(blocks)
-        states = self.engine.previews()
-        # The voices that play these blocks (a run of bars is one voice).
-        keys = {self._block_voice(track, bar, states) for track, bar in blocks}
-        if keys and all(states.get(key, (False,))[0] for key in keys):
-            # The loop pauses as one; blocks outside the selection play on.
-            for key in keys:
-                self.engine.preview_pause(key)
+    def _project_selection(self) -> None:
+        """Draw the Selection Registry on the canvases (picks and Qt's
+        selection are its picture), dropping identities nothing resolves
+        to any more, so no stale id stays selected."""
+        picks_by_view = {view: {} for view in self._timelines()}
+        whole = {}
+        kept = []
+        for identity in self.selection_registry.ids:
+            index = None if is_block_id(identity) else self._node_track(identity)
+            if index is not None:
+                whole.setdefault(self._view_for(index), set()).add(index)
+                kept.append(identity)
+                continue
+            block = self._identity_block(identity)
+            if block is None:
+                continue
+            index, bar = block
+            picks_by_view[self._view_for(index)].setdefault(index, set()).add(bar)
+            kept.append(identity)
+        self.selection_registry.replace(kept)
+        self._projecting = True
+        try:
+            for view, picks in picks_by_view.items():
+                chosen = whole.get(view, set())
+                view.scene_obj.blockSignals(True)
+                try:
+                    for clip in view._clip_items():
+                        if clip.isSelected() != (clip.clip_index in chosen):
+                            clip.setSelected(clip.clip_index in chosen)
+                finally:
+                    view.scene_obj.blockSignals(False)
+                view.set_picks(picks)
+                view._update_combined_play()
+        finally:
+            self._projecting = False
+
+    # -- selection playback ----------------------------------------------------
+    # The selection's shared ▶ plays the selected blocks through the one
+    # arrangement transport: the mixer is filtered to their stretches, each
+    # sounds where it sits on the timeline, on the transport's clock, and
+    # the transport loops over the selection. Pause pauses the transport,
+    # so nothing of the selection plays on. A block's own ▶ still auditions
+    # that block as a voice (see _start_blocks); the two never overlap.
+
+    def _selection_play_active(self) -> bool:
+        """Whether the transport is playing (or holding) the selection."""
+        return self.engine.transport_filter is not None and bool(self._selection_play_ids)
+
+    def _toggle_selection_play(self, blocks) -> None:
+        """▶ / ⏸ on the selection: start it, or pause or resume it."""
+        if self._selection_play_active():
             if self.engine.playing:
                 self._pause()
-            self._sync_previews()
-            return
-        try:
-            if keys and all(key in states for key in keys):
-                self._yield_transport()
-                self.engine.preview_resume(keys)  # paused together: on together
             else:
-                # Every selected block on its song's clock (see _start_blocks):
-                # ones already playing go on where they are, the rest join.
-                tracks = self.project.tracks
-                chosen = self._chosen_tracks()
-                for key in list(states):
-                    if key not in keys and 0 <= key[0] < len(tracks) and id(tracks[key[0]]) in chosen:
-                        self.engine.preview_stop(key)
-                        self._preview_tracks.pop(key, None)
-                waiting = [
-                    (track, bar) for track, bar in blocks
-                    if not states.get(self._block_voice(track, bar, states), (False,))[0]
-                ]
-                self._start_blocks(waiting)
-                count = len({track for track, _bar in blocks})
-                self.statusBar().showMessage(
-                    f"Looping {count} selected track{'s' if count != 1 else ''} together, in time", 4000
+                self._play(keep_focus=True)
+            return
+        ranges, start, end, ids = self._selection_ranges(blocks)
+        if not ranges:
+            return
+        self._selection_play_ids = set(ids)
+        self.engine.set_transport_filter(ranges)
+        self._engage_loop(start, end)
+        self._selection_play_loop = (start, end)
+        self.engine.seek(start)
+        self.playback_registry.start(ids)
+        self._update_selection_playhead()
+        self._play(keep_focus=True)  # stops block voices: the transport plays these now
+        count = len({track for track, _bar in blocks})
+        self.statusBar().showMessage(
+            f"Playing {count} selected track{'s' if count != 1 else ''} on the timeline, in time", 4000
+        )
+
+    def _update_selection_playhead(self) -> None:
+        """The playhead's look follows who owns playback: the full canvas
+        height for the arrangement transport, only the selected lanes while
+        the transport plays the selection (none on a canvas with no selected
+        lane), and hidden for block audition (see _sync_previews). The
+        position is the transport's in every case: no second clock."""
+        active = self._selection_play_active()
+        lanes = {}
+        if active:
+            for identity in self._selection_play_ids:
+                block = self._identity_block(identity)
+                if block is not None:
+                    lanes.setdefault(self._view_for(block[0]), set()).add(block[0])
+        for view in self._timelines():
+            if not active:
+                view.set_playhead_bands(None)
+                continue
+            bands = [band for index in lanes.get(view, ()) if (band := view.lane_band(index)) is not None]
+            merged = []
+            for top, bottom in sorted(bands):
+                if merged and top <= merged[-1][1] + 0.5:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], bottom))  # one row, one band
+                else:
+                    merged.append((top, bottom))
+            view.set_playhead_bands(merged)
+
+    def _selection_ranges(self, blocks):
+        """``(filter, start, end, identities)`` for ``blocks``: per clip
+        index the arrangement frames of each block, the span they cover in
+        seconds, and each block's stable identity."""
+        ranges: dict[int, list] = {}
+        start = end = None
+        ids = []
+        for track, bar in blocks:
+            times = self._view_for(track).block_times(track, bar)
+            identity = self._block_identity(track, bar)
+            if times is None or identity is None:
+                continue
+            first, last = float(times[0]), float(times[1])
+            ranges.setdefault(track, []).append((int(round(first * OUTPUT_RATE)), int(round(last * OUTPUT_RATE))))
+            start = first if start is None else min(start, first)
+            end = last if end is None else max(end, last)
+            ids.append(identity)
+        return ranges, start, end, ids
+
+    def _stop_selection_play(self) -> None:
+        """The selection stops playing: the transport is unfiltered again
+        and its loop goes. The selection stays."""
+        if self.engine.transport_filter is None and not self.playback_registry.states:
+            return
+        self.engine.set_transport_filter(None)
+        self.playback_registry.stop()
+        self._selection_play_ids = set()
+        self._update_selection_playhead()
+        if self._selection_play_loop is not None and self._loop_bounds == self._selection_play_loop:
+            self._clear_loop()
+        self._selection_play_loop = None
+
+    def _follow_selection(self) -> None:
+        """A selection edit on a canvas, by any means: into the Selection
+        Registry, then, while the selection plays, into the mixer filter once
+        the current operation is done (one that clears the selection and
+        picks it again leaves it as it was, and restarts nothing)."""
+        if self._projecting:
+            return
+        self._selection_from_views()
+        if self._selection_play_active() and not self._selection_edit_pending:
+            self._selection_edit_pending = True
+            QTimer.singleShot(0, self._apply_selection_edit)
+
+    def _apply_selection_edit(self) -> None:
+        """The Selection Registry changed while it plays through the
+        transport. A block that left it leaves the filter at once (silent
+        from the next audio block) and the Playback Registry; the rest play
+        on, on the same clock. A block picked into it joins at the
+        transport's place; a track selected whole (a click on its name, to
+        edit it) does not start playing by that alone. With nothing left the
+        selection stops."""
+        self._selection_edit_pending = False
+        if self._following_selection or not self._selection_play_active():
+            return
+        self._following_selection = True
+        try:
+            blocks = []
+            for index, bar in self._selected_blocks():  # parents resolved to their blocks
+                identity = self._block_identity(index, bar)
+                if identity is None:
+                    continue
+                picked = identity in self.selection_registry  # picked itself, not via its whole track
+                if identity in self._selection_play_ids or picked:
+                    blocks.append((index, bar))
+            if not blocks:
+                self._stop_selection_play()
+                if self.engine.playing:
+                    self._pause()
+                self._sync_transport_lamp()
+                return
+            ranges, _start, _end, ids = self._selection_ranges(blocks)
+            self._selection_play_ids = set(ids)
+            self.engine.set_transport_filter(ranges)
+            state = "playing" if self.engine.playing else "paused"
+            self.playback_registry.states = {identity: state for identity in ids}
+            self._update_selection_playhead()
+        finally:
+            self._following_selection = False
+
+    def _refresh_selection_filter(self) -> None:
+        """Tracks were reloaded (indices or blocks may have changed): the
+        filter follows the playing identities."""
+        if self.engine.transport_filter is None or not self._selection_play_ids:
+            return
+        blocks = [block for identity in self._selection_play_ids if (block := self._identity_block(identity)) is not None]
+        ranges, _start, _end, ids = self._selection_ranges(blocks)
+        if not ranges:
+            self._stop_selection_play()
+            return
+        self._selection_play_ids = set(ids)
+        self.engine.set_transport_filter(ranges)
+        state = "playing" if self.engine.playing else "paused"
+        self.playback_registry.states = {identity: state for identity in ids}
+        self._update_selection_playhead()  # rows may have moved
+
+    # -- the Track Registry --------------------------------------------------
+
+    def _sync_registry(self) -> None:
+        """Keep the Track Registry in step with the tracks (the adapter while
+        the window still edits track dicts).
+
+        Every track gets a node with a stable id ("node_id" on the dict): a
+        song or file is an original, a split's stems are stems under one
+        original for the split, and a track copied from another (a block
+        dragged out, an old split piece) is a segment under the node it came
+        from, so no id is ever active twice. A node keeps its id through
+        moves, saves and undo; one whose track is gone is deactivated, not
+        deleted. Detected downbeats go to the source asset in sample frames.
+        """
+        registry = self.track_registry
+        timeline = self.session_timeline
+        tracks = self.project.tracks
+        live = set()
+        first_of_stem: dict[tuple, str] = {}
+        for track in tracks:
+            path = str(track.get("path") or "")
+            audio = track.get("_audio")
+            total = int(len(audio)) if audio is not None else 0
+            asset = registry.assets.get(track.get("asset_id") or "")
+            if asset is None:
+                asset = registry.asset_for(path, OUTPUT_RATE, total) if path else registry.asset_for(f"memory:{id(track)}", OUTPUT_RATE, total)
+                track["asset_id"] = asset.id
+            events = track.get("downbeats") or ()
+            if events:
+                asset.beats = [int(round(float(time) * OUTPUT_RATE)) for time, _position in events]
+                asset.downbeats = [int(round(float(time) * OUTPUT_RATE)) for time, position in events if int(position) == 1]
+            start = float(track.get("start", 0.0) or 0.0)
+            offset = float(track.get("offset", 0.0) or 0.0)
+            duration = float(track.get("duration", 0.0) or 0.0)
+            source = (int(round(offset * OUTPUT_RATE)), int(round((offset + duration) * OUTPUT_RATE)))
+            place = (int(round(timeline.seconds_to_tick(start))), int(round(timeline.seconds_to_tick(start + duration))))
+            node = registry.get(track.get("node_id"))
+            group = stem_group(track)
+            stem_key = (group, path) if group and path else None  # an old piece shares its stem's file
+            if node is None or node.id in live:
+                parent = None
+                kind = TRACK_ORIGINAL
+                if node is not None:  # a copy of a track already seen: a stretch of it
+                    parent, kind = node.id, TRACK_SEGMENT
+                elif stem_key in first_of_stem:  # an old split piece of a stem
+                    parent, kind = first_of_stem[stem_key], TRACK_SEGMENT
+                elif group:
+                    song = f"song-{group}"
+                    if registry.get(song) is None:
+                        registry.create(TRACK_ORIGINAL, None, 0, 0, 0, 0, node_id=song)
+                    parent, kind = song, TRACK_STEM
+                node = registry.create(
+                    kind, asset.id, source[0], source[1], place[0], place[1],
+                    parent_id=parent, stem_type=track.get("stem_type"),
                 )
-        except Exception as exc:
-            QMessageBox.critical(self, "Audio output error", f"Could not play the blocks.\n\n{exc}")
-        self.stem_splitter.stop_preview()
-        self._sync_previews()
-        if not self.frame_timer.isActive():
-            self.frame_timer.start()
+                track["node_id"] = node.id
+            node.active = True
+            node.source_asset_id = asset.id
+            node.source_start_frame, node.source_end_frame = source
+            node.arrangement_start_tick, node.arrangement_end_tick = place
+            live.add(node.id)
+            if stem_key and stem_key not in first_of_stem:
+                first_of_stem[stem_key] = node.id
+        managed = self.action_history.managed()
+        for node in registry.nodes.values():
+            if node.id in live or node.id in managed:
+                continue  # managed: a split's original and halves follow the history
+            if node.track_type == TRACK_ORIGINAL and any(child.id in live for child in registry.children(node.id, False)):
+                node.active = True  # a split's original stays while its stems do
+            elif node.created_by_action_id == "selection":
+                node.active = node.parent_id in live  # a block's segment lives with its track
+            else:
+                node.active = False
+        self.selection_registry.reconcile(registry)
+        self.playback_registry.reconcile(registry, self.selection_registry)
+
+    def _segment_of_block(self, track_index: int, start: float, end: float):
+        """The registry segment of one block of a track (arrangement seconds
+        ``start`` to ``end``), made when first needed."""
+        tracks = self.project.tracks
+        if not (0 <= track_index < len(tracks)):
+            return None
+        track = tracks[track_index]
+        node = self.track_registry.get(track.get("node_id"))
+        if node is None:
+            self._sync_registry()
+            node = self.track_registry.get(track.get("node_id"))
+            if node is None:
+                return None
+        clip_start = float(track.get("start", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        first = int(round((offset + start - clip_start) * OUTPUT_RATE))
+        last = int(round((offset + end - clip_start) * OUTPUT_RATE))
+        timeline = self.session_timeline
+        segment = self.track_registry.segment_for(
+            node.id, first, last, int(round(timeline.seconds_to_tick(start))), int(round(timeline.seconds_to_tick(end)))
+        )
+        if segment.created_by_action_id is None and segment.id != node.id:
+            segment.created_by_action_id = "selection"
+        return segment
 
     def _chosen_tracks(self) -> set[int]:
-        """The selected tracks (picked blocks or selected clips), by identity."""
+        """The tracks with anything selected, from the Selection Registry
+        (as track objects' ids, for code that matches tracks by object)."""
         tracks = self.project.tracks
-        indices = set()
-        for view in self._timelines():
-            indices.update(view.picks())
-            indices.update(view.selected_indices())
-        return {id(tracks[index]) for index in indices if 0 <= index < len(tracks)}
+        return {id(tracks[index]) for index, _bar in self._selected_blocks() if 0 <= index < len(tracks)}
 
     def _key_chosen(self, key) -> bool:
         tracks = self.project.tracks
@@ -4628,6 +5283,17 @@ class MainWindow(QMainWindow):
                     found.append((track, other))
         return found
 
+    def _arrangement_time(self, index: int, song: float) -> float:
+        """A track's song-file time ``song`` as arrangement seconds."""
+        track = self.project.tracks[index]
+        return float(track.get("start", 0.0) or 0.0) + float(song) - float(track.get("offset", 0.0) or 0.0)
+
+    def _split_at(self, index: int, seconds: float) -> bool:
+        """Whether a split mark of this track sits at arrangement ``seconds``."""
+        track = self.project.tracks[index]
+        at = float(track.get("offset", 0.0) or 0.0) + float(seconds) - float(track.get("start", 0.0) or 0.0)
+        return any(abs(float(mark) - at) < 1e-3 for mark in track.get("splits") or ())
+
     def _block_runs(self, keys) -> list[tuple[int, int, int]]:
         """``(track, first bar, last bar)`` for ``keys``: a stem's bars side
         by side become one run; every other block stands alone."""
@@ -4646,7 +5312,9 @@ class MainWindow(QMainWindow):
                 times = view.block_times(track, bar)
                 if times is None:
                     continue
-                if run is not None and run[1] == bar - 1 and abs(run[2] - times[0]) < 1e-3:
+                # Bars that touch, including across a split mark, are one run.
+                # A combined play of the track is one voice, not a voice per bar.
+                if run is not None and abs(run[2] - times[0]) < 1e-3:
                     run = (run[0], bar, times[1])
                     continue
                 if run is not None:
@@ -4662,17 +5330,77 @@ class MainWindow(QMainWindow):
         if self.engine.playing:
             self._pause()
 
-    def _start_blocks(self, keys) -> None:
-        """Start (or resume) blocks together, on the same audio sample.
-        Stems join their split's clock; see _voice_key.
+    def _playback_anchor(self, blocks, clicked):
+        """The block playback starts from: a clip this drag moved, else the
+        block whose ▶ was pressed."""
+        tracks = self.project.tracks
 
-        Every block is its own voice and plays at once: a block never waits
-        for another, nor restarts one already playing. Pieces of a cut stem
-        side by side are separate blocks too; on their split's clock each
-        plays its own span (``shift``) and loops on its own length, so they
-        sound together, sample-locked, instead of one after the other."""
+        def moved(pair) -> bool:
+            track = pair[0]
+            return 0 <= track < len(tracks) and id(tracks[track]) in self._moved_ids
+
+        if clicked is not None and moved(clicked):
+            return clicked
+        for pair in blocks:
+            if moved(pair):
+                return pair
+        return clicked
+
+    def _arrange_moved_selection(self, groups, placed, anchor) -> bool:
+        """Play the selected pieces of one stem as one track.
+
+        Each scissor piece is its own clip. Giving every piece a loop of its
+        own makes them all start together, so one drums stem sounds like
+        several tracks. One clock walks the timeline instead: each piece
+        keeps its place, source offset and duration, and sounds only while
+        the clock is over it. A single block is left on its song's clock.
+        """
+        del anchor  # the track starts at its first piece, not at one block
+        plain = [name for name, entry in groups.items() if entry[2] is None]
+        keys = [key for name in plain for key in groups[name][1]]
+        if len(keys) < 2:
+            return False
+        for name in plain:
+            for key, member in groups[name][1].items():
+                arr0, arr1, _song, _song_end = placed[key]
+                track = self.project.tracks[member[1]]
+                start = float(track.get("start", 0.0) or 0.0)
+                duration = float(track.get("duration", 0.0) or 0.0)
+                covers = bool(track.get("bar_block")) or (
+                    abs(arr0 - start) <= 0.05 and abs((arr1 - arr0) - duration) <= 0.05
+                )
+                if not covers:
+                    return False  # a bar inside a longer stem keeps its own slice
+        origin = min(placed[key][0] for key in keys)
+        members = {}
+        loop_end = origin
+        for name in plain:
+            for key, member in groups.pop(name)[1].items():
+                arr0, arr1, song, _song_end = placed[key]
+                # shift = offset - start: the clock is arrangement time.
+                members[key] = (*member, song - arr0, None)
+                loop_end = max(loop_end, arr1)
+        length = max(loop_end - origin, 1.0 / OUTPUT_RATE)
+        tag = ",".join(f"{key[0]}:{key[1]}" for key in sorted(members))
+        groups[f"selection:{tag}"] = [origin, members, (origin, origin + length), loop_end]
+        return True
+
+    def _start_blocks(self, keys, retire_keys=(), anchor=None) -> None:
+        """Start (or resume) blocks together, on the same audio sample.
+        Stems of one song join that song's clock; a selection that spans
+        songs shares one clock (see unify_selection_groups). A clip a drag
+        moved shares that clock too, starting at its timeline position.
+
+        Pieces of one cut stem play as that one track: one clock walks their
+        timeline, and each piece sounds only in its own place. A single
+        block stays on its song's clock. A voice this start replaces is
+        stopped after the new voices exist, so the same audio is not heard
+        twice. Voices outside the selection are not stopped and their clocks
+        are not moved."""
         groups: dict[str, list] = {}  # group -> [start, members, loop, end] (song seconds)
         spans: dict[tuple, tuple] = {}  # stem voice key -> (start, end) of its own block, song seconds
+        placed: dict[tuple, tuple] = {}  # voice key -> arrangement and song span of the block
+        retire = []  # voices a new run replaces; stopped after the run exists, so the clock stays
         units = self._block_runs(self._whole_pieces(keys))
         for track, bar, last in units:
             view = self._view_for(track)
@@ -4695,11 +5423,27 @@ class MainWindow(QMainWindow):
             if loop is None:
                 key = (track, stem_block(bar))
                 # Blocks of this stem inside the new run give way to it.
+                # So does a voice left under a bar number the clip no longer
+                # has: a move renumbers the block, and the old voice would
+                # keep playing on its own.
                 for other, (_data, run) in list(self._preview_tracks.items()):
                     if other[0] == track and other[1] <= STEM_BLOCK and other != key and run and run[0] <= last and bar <= run[1]:
-                        self.engine.preview_stop(other)
+                        retire.append(other)
                         del self._preview_tracks[other]
+                for other in list(self.engine.previews()):
+                    if (
+                        isinstance(other, tuple)
+                        and len(other) == 2
+                        and other[0] == track
+                        and other != key
+                        and other[1] <= STEM_BLOCK
+                        and other not in retire
+                        and view.block_times(track, stem_block(other[1])) is None
+                    ):
+                        retire.append(other)
+                        self._preview_tracks.pop(other, None)
                 self._preview_tracks[key] = (data, (bar, last))
+                placed[key] = (times[0], times[1], song, end)
             else:
                 key = (track, STEM_VOICE)
                 self._preview_tracks[key] = (data, None)
@@ -4708,6 +5452,12 @@ class MainWindow(QMainWindow):
         if not groups:
             return
         self._yield_transport()
+        # A moved clip joins the selection on one arrangement clock. Otherwise
+        # several songs in one selection share one clock, and one song keeps
+        # its own so a later block can still join it.
+        anchor = self._playback_anchor([(track, bar) for track, bar, _last in units], anchor)
+        if not self._arrange_moved_selection(groups, placed, anchor):
+            unify_selection_groups(groups)
         joining = {group for group in groups if self.engine.group_position(group) is not None}
         for group, entry in groups.items():
             if entry[2] is not None:
@@ -4733,11 +5483,17 @@ class MainWindow(QMainWindow):
                 entry[0] = first
             for key, member in members.items():
                 shift = 0.0 if ref is None else spans[key][0] - ref[0]
-                members[key] = (*member, shift, spans[key][1] - spans[key][0])
+                # A block that ends at a split mark does not reach past it.
+                sealed = self._split_at(member[1], self._arrangement_time(member[1], spans[key][1]))
+                members[key] = (*member, shift, spans[key][1] - spans[key][0], sealed)
         try:
+            member_keys = {key for _start, members, _loop, _end in groups.values() for key in members}
             with self.engine.batch():  # everything starts on the same block
                 for group, (start, members, loop, end) in groups.items():
                     self.engine.stem_play(group, list(members.values()), max(0.0, start), loop=loop)
+                for key in (*retire, *retire_keys):
+                    if key not in member_keys:
+                        self.engine.preview_stop(key)
         except Exception as exc:
             for _start, members, _loop, _end in groups.values():
                 for key, *_rest in members.values():
@@ -5007,11 +5763,17 @@ class MainWindow(QMainWindow):
         must hold the very stretch it played. Otherwise (no such clip, or the
         block was cut) the voice stops: nothing would show it playing."""
         tracks = self.project.tracks
-        if span is None or track not in tracks:
+        if span is None or not any(other is track for other in tracks):
             self.engine.preview_stop(key)
             self._preview_tracks.pop(key, None)
             return
         song = float(span[0])
+        if any(song + 1e-3 < float(mark) < song + float(span[1]) - 1e-3 for mark in track.get("splits") or ()):
+            # Split in Half cut the block it plays: that block is gone, so is
+            # its voice. ▶ plays either half.
+            self.engine.preview_stop(key)
+            self._preview_tracks.pop(key, None)
+            return
 
         def holds(other) -> bool:
             offset = float(other.get("offset", 0.0) or 0.0)

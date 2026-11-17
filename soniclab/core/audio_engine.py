@@ -47,7 +47,7 @@ class _Voice:
     """
 
     __slots__ = (
-        "key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "generation",
+        "key", "clip", "start", "end", "cursor", "playing", "group", "muted", "shift", "length", "generation", "sealed",
     )
 
     def __init__(self, key, clip: int, start: int, end: int, group=None):
@@ -65,6 +65,10 @@ class _Voice:
         # voice gets a new number, so a pause, resume or stop meant for the
         # old one (a late click, a stale callback) cannot reach the new one.
         self.generation = 0
+        # The block ends at a split mark: the audio past it is another
+        # block's, so its loop fades out at its end instead of crossfading
+        # into that audio.
+        self.sealed = False
 
 
 class _Group:
@@ -154,6 +158,15 @@ def _own_length(voice, loop):
     if voice.length is None or loop is None or voice.length <= 0 or voice.length >= loop[1] - loop[0]:
         return None
     return voice.length
+
+
+def _explicit_span(voice, group):
+    """The file frames a block voice loops, ``(start, end)``, or None when
+    it has no length of its own and simply follows the group loop."""
+    if group is None or group.loop is None or not voice.length or voice.length <= 0:
+        return None
+    start = int(group.loop[0]) + int(voice.shift)
+    return start, start + int(voice.length)
 
 
 def _wrap(frame: float, loop) -> float:
@@ -276,6 +289,9 @@ class AudioEngine:
         # Diagnostics, written by the callback without allocating: its last
         # durations (seconds), callbacks counted, deadline misses (a block
         # took longer than it lasts) and underruns PortAudio reported.
+        # The transport plays only these stretches when set (see
+        # set_transport_filter); built off the audio thread, read by it.
+        self._transport_filter = None
         self._timing = np.zeros(4096, dtype=np.float64)
         self._timed = 0
         self._late = 0
@@ -467,6 +483,24 @@ class AudioEngine:
             # block from it reaches the speakers.
             self._heard = ((time.monotonic(), ((self._position, 0),)),) if self._playing else ()
 
+    def set_transport_filter(self, ranges) -> None:
+        """Let the transport play only some stretches: ``{clip index:
+        [(start frame, end frame), ...]}`` in arrangement frames, or None for
+        every clip. The selection plays through the one arrangement mixer and
+        clock this way, never on a clock of its own."""
+        prepared = None
+        if ranges is not None:
+            prepared = {
+                int(index): tuple(sorted((int(a), int(b)) for a, b in spans if int(b) > int(a)))
+                for index, spans in ranges.items()
+            }
+        with self._lock:
+            self._transport_filter = prepared
+
+    @property
+    def transport_filter(self):
+        return self._transport_filter
+
     def set_loop(self, start_seconds, end_seconds) -> bool:
         """Loop in arrangement samples. The end is exclusive."""
         start = int(round(float(start_seconds) * OUTPUT_RATE))
@@ -565,10 +599,16 @@ class AudioEngine:
         capture = self._capture_enabled and frames <= len(self._scratch)
         segments, next_position = self._playback_segments(position, frames)
         self._heard = (self._heard + ((sounds_at, tuple(segments)),))[-HEARD_BLOCKS:]
+        allowed = self._transport_filter
         for index, clip in enumerate(clips):
             heard = not clip["muted"] and not (soloed and not clip.get("solo"))
             if not heard:
                 continue
+            ranges = None
+            if allowed is not None:
+                ranges = allowed.get(index)
+                if not ranges:
+                    continue  # not in the filtered selection
             scratch = None
             if capture and index < len(self._track_rings):
                 scratch = self._scratch[:frames]
@@ -577,7 +617,16 @@ class AudioEngine:
             filled = 0
             for seg_position, span in segments:
                 target = scratch[filled : filled + span] if scratch is not None else outdata[filled : filled + span]
-                peak = max(peak, mix_clip_into(target, clip, seg_position))
+                if ranges is None:
+                    peak = max(peak, mix_clip_into(target, clip, seg_position))
+                else:
+                    # Only the selected stretches of this clip, each where it
+                    # sits on the arrangement: one clock, one mix.
+                    for first, last in ranges:
+                        low, high = max(first, seg_position), min(last, seg_position + span)
+                        if high > low:
+                            at = low - seg_position
+                            peak = max(peak, mix_clip_into(target[at : at + (high - low)], clip, low))
                 filled += span
             if scratch is not None:
                 outdata[:frames] += scratch
@@ -623,7 +672,10 @@ class AudioEngine:
                 group.running = True
                 if voice.muted or (soloed and not clip.get("solo")):
                     continue
-                peak = self._mix_stem(outdata, clip, clip["start"] - offset + voice.shift, group, _own_length(voice, group.loop))
+                peak = self._mix_stem(
+                    outdata, clip, clip["start"] - offset + voice.shift, group, _own_length(voice, group.loop),
+                    voice.length if voice.sealed else None,
+                )
             else:
                 if not voice.playing:
                     continue
@@ -647,15 +699,16 @@ class AudioEngine:
             self._drop_empty_groups()
         self._publish_previews(sounds_at)
 
-    def _mix_stem(self, outdata, clip, base: int, group, length=None) -> float:
+    def _mix_stem(self, outdata, clip, base: int, group, length=None, stretch=None) -> float:
         """One stem along its group's runs for this block. ``base`` turns a
         file frame into the clip's arrangement frame. ``length`` (frames,
         shorter than the group's loop, or None) is the stem's own loop: it
         wraps back to the loop start every ``length`` frames of the clock.
 
         A wrap crossfades the loop start with the audio just past the end.
-        Where the clip has no audio past the end (a piece cut at its block)
-        the end fades out instead, so the wrap never clicks."""
+        Where there is none of this voice's own (the clip ends, or
+        ``stretch``, the block's length in frames, does) the end fades out
+        instead, so the wrap never clicks and never plays the next block."""
         loop = group.loop
         peak = 0.0
         filled = 0
@@ -672,6 +725,12 @@ class AudioEngine:
         wrapped_at = (loop[1] - first) % length or length
         clip_frames = int(clip.get("length", len(clip["audio"]) - int(clip.get("offset", 0))))
         room = clip["start"] + clip_frames - base  # the clock frame the clip's audio ends at
+        if stretch:
+            # A block that ends at a split mark plays its own stretch only:
+            # past it is the next block's audio, so the wrap fades out and in
+            # rather than crossfading into it. A bar's loop does crossfade
+            # into the bar after it, which is the same stem playing on.
+            room = min(room, first + int(stretch))
         fade_out = first + length + fade > room
         for frame, span, fading in group.segments:
             clock = frame
@@ -700,7 +759,12 @@ class AudioEngine:
                             tail = first + length + phase  # the stem's own wrap
                         if tail is not None:
                             faded = min(count, fade - phase)
-                            self._mix_blend(target[:faded], clip, base + first + phase, base + tail, phase, fade)
+                            if fade_out:
+                                # Past this voice's end is not its audio: the
+                                # end faded out, so the start fades in.
+                                self._mix_fade_in(target[:faded], clip, base + first + phase, phase, fade)
+                            else:
+                                self._mix_blend(target[:faded], clip, base + first + phase, base + tail, phase, fade)
                     if count > faded:
                         peak = max(peak, mix_clip_into(target[faded:], clip, base + first + phase + faded))
                 clock += count
@@ -716,6 +780,16 @@ class AudioEngine:
         mix_clip_into(buffer, clip, start)
         buffer *= self._fade_ramp[left - count : left][::-1, None]
         target += buffer
+
+    def _mix_fade_in(self, target, clip, head_at: int, into: int, length: int) -> None:
+        """A loop start (from arrangement frame ``head_at``) rising from
+        silence, ``into`` frames into a fade of ``length``."""
+        count = len(target)
+        head = self._fade_head[:count]
+        head.fill(0)
+        mix_clip_into(head, clip, head_at)
+        head *= (self._fade_ramp[into : into + count] * (LOOP_XFADE / max(1, length)))[:, None]
+        target += head
 
     def _mix_blend(self, target, clip, head_at: int, tail_at: int, into: int, length: int) -> None:
         """A loop start (from arrangement frame ``head_at``) fading in over
@@ -873,7 +947,8 @@ class AudioEngine:
 
         ``members`` is a list of ``(key, clip index)``, ``(key, clip
         index, muted)``, ``(key, clip index, muted, shift seconds)`` or
-        ``(key, clip index, muted, shift seconds, length seconds)``: a shift
+        ``(key, clip index, muted, shift seconds, length seconds)`` (and a sixth,
+        ``sealed``: the block ends at a split mark, see _Voice): a shift
         plays that much later in the stem's file on the same clock, and a
         length is how much of each loop cycle it plays (see ``_Voice``). If the group is not playing yet its clock starts at
         ``start_seconds`` of the source song (the stem files' own time);
@@ -910,9 +985,31 @@ class AudioEngine:
                     voice.shift = int(round(float(member[3]) * OUTPUT_RATE))
                 if len(member) > 4:
                     voice.length = None if member[4] is None else int(round(float(member[4]) * OUTPUT_RATE))
+                if len(member) > 5:
+                    voice.sealed = bool(member[5])
+                # One instance of this block: another voice of the same clip
+                # on this clock, covering the same stretch of the file, is
+                # the individual voice this member just took over. Voices of
+                # other clips, other groups, and other stretches stay.
+                self._retire_overlapping(voice)
             self._drop_empty_groups()
             self._publish_previews()
         self._ensure_stream()
+
+    def _retire_overlapping(self, voice) -> None:
+        """Drop voices of ``voice``'s clip and group whose own file stretch
+        overlaps ``voice`` (lock held). The group clock is left where it is."""
+        group = self._groups.get(voice.group)
+        span = _explicit_span(voice, group)
+        if span is None:
+            return
+        for key, other in list(self._voices.items()):
+            if other is voice or other.group != voice.group or other.clip != voice.clip:
+                continue
+            other_span = _explicit_span(other, group)
+            if other_span is not None and other_span[0] < span[1] and span[0] < other_span[1]:
+                self._voices.pop(key, None)
+                self._completed.pop(key, None)
 
     def group_set_loop(self, group, loop) -> None:
         """Change a playing group's loop to ``(start, end)`` seconds of the

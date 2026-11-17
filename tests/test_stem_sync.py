@@ -829,34 +829,23 @@ class SharedClockWindowTests(unittest.TestCase):
         QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
         self.app.processEvents()
         self.assertEqual(self.engine.previews(), {})
+        # A mark on the same track: one track, its first bar now two blocks.
         tracks = self.window.project.tracks
-        same = [i for i, track in enumerate(tracks) if track.get("path") == drums["path"]]
-        halves = [i for i in same if tracks[i].get("bar_block")]
-        rest = [i for i in same if not tracks[i].get("bar_block")]
-        self.assertEqual(len(halves), 2)
-        self.assertEqual(sorted(round(tracks[i]["duration"], 3) for i in halves), [1.0, 1.0])
-        self.assertEqual(len(rest), 1)
-        self.assertAlmostEqual(tracks[rest[0]]["duration"], 6.0)
-        self.assertAlmostEqual(tracks[rest[0]]["start"], 2.0)
-        rows, _primaries = view.lane_rows(tracks)
-        self.assertEqual(rows[halves[0]], rows[halves[1]])
-        self.assertEqual(rows[halves[0]], rows[rest[0]])
-        left, right = sorted(halves, key=lambda i: tracks[i]["start"])
-        self.assertAlmostEqual(tracks[left]["start"], 0.0)
-        self.assertAlmostEqual(tracks[right]["start"], 1.0)
-        self.assertAlmostEqual(view._clip_for(left).pos().y(), view._clip_for(rest[0]).pos().y())
-        self.assertAlmostEqual(view._clip_for(right).pos().y(), view._clip_for(rest[0]).pos().y())
-        for piece in halves:
-            item = view._clip_for(piece)
-            self.assertTrue(any(isinstance(child, BarPlayButton) for child in item.childItems()))
-            self.assertTrue(any(isinstance(child, HalfSplitButton) for child in item.childItems()))
-        kept = view._clip_for(rest[0])
-        self.assertGreaterEqual(sum(isinstance(child, HalfSplitButton) for child in kept.childItems()), 3)
+        self.assertEqual(sum(track.get("path") == drums["path"] for track in tracks), 1)
+        self.assertEqual(drums.get("splits"), [1.0])
+        clip = view._clip_for(index)
+        spans = [(round(float(span[3]), 3), round(float(span[4]), 3)) for span in view._spans_of(clip)]
+        self.assertEqual(spans[:3], [(0.0, 1.0), (1.0, 2.0), (2.0, 4.0)])
+        for span in view._spans_of(clip)[:2]:  # each half has its own ▶ and ✂
+            left, right = float(span[1]), float(span[2])
+            inside = lambda child: left - 1 <= child.pos().x() + 8 <= right + 1
+            self.assertTrue(any(isinstance(c, BarPlayButton) and inside(c) for c in clip.childItems()))
+            self.assertTrue(any(isinstance(c, HalfSplitButton) and inside(c) for c in clip.childItems()))
         view.set_picks({})
         view.scene_obj.clearSelection()
-        bar = view.block_at_time(rest[0], float(tracks[rest[0]]["start"]) + 0.4)
-        self.press(rest[0], bar)
-        group = stem_group(tracks[rest[0]])
+        bar = view.block_at_time(index, 2.4)  # the bar after the split
+        self.press(index, bar)
+        group = stem_group(drums)
         loop = self.engine._groups[group].loop
         self.assertEqual(loop[1] - loop[0], 2 * OUTPUT_RATE)
 
