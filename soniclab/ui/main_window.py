@@ -308,15 +308,17 @@ class MainWindow(QMainWindow):
         self._projecting = False  # drawing the registry's selection on the canvases
         # Where each playing block is now: identity -> (track, bar).
         self._member_blocks: dict = {}
+        # The bar (frames) every playing block is fitted to, locked when
+        # block playback begins and kept until it ends.
+        self._member_bar = None
         # The selection before the current burst of edits (see
         # _follow_selection), or None between bursts.
         self._selection_before = None
         # The downbeat grid each track was last cut on, by track identity, so
         # new beat results recut the blocks once (see _apply_detected_beats).
         self._cut_grids: dict = {}
-        # Whether playing blocks loop, each within its own stretch. The loop
-        # button sets it while blocks play; the arrangement's loop region
-        # has no say in it.
+        # Selected and combined tracks always loop, each row on its own cycle.
+        # The loop button is the song's loop region only.
         self._block_loop = True
         self._moved_ids: set[int] = set()  # tracks a drag just moved, by identity
         self._build_arrangement()
@@ -457,13 +459,29 @@ class MainWindow(QMainWindow):
         bar.addWidget(word)
 
         self.play_btn = self._tool_button(play_icon(), "Play the canvas under the mouse (Space)", self._play_hovered, "playBtn")
-        self.pause_btn = self._tool_button(pause_icon(), "Pause", self._pause)
-        self.stop_btn = self._tool_button(stop_icon(), "Stop", self._stop)
+        self.pause_btn = self._tool_button(pause_icon(), "Pause", self._pause_pressed)
+        self.stop_btn = self._tool_button(stop_icon(), "Stop", self._stop_pressed)
         self.return_btn = self._tool_button(
             return_icon(), "Return to start", self._return_to_start
         )
         for button in (self.play_btn, self.pause_btn, self.stop_btn, self.return_btn):
             bar.addWidget(button)
+        # Off: Pause and Stop act on everything. On: on the selected tracks
+        # only, the others play on.
+        self.selected_only_btn = self._text_button(
+            "Selected", "Pause, Stop and Space act on the selected tracks only; the others play on (Ctrl+Shift+P)",
+            lambda: None,
+        )
+        self.selected_only_btn.setCheckable(True)
+        bar.addWidget(self.selected_only_btn)
+        # Two or more selected always share one ▶. On: the rows' shared ▶ are
+        # joined by the yellow line too (off by default).
+        self.link_btn = self._text_button(
+            "Link", "Show the yellow line joining the selected tracks' shared ▶ (Ctrl+Shift+L)", lambda: None
+        )
+        self.link_btn.setCheckable(True)
+        self.link_btn.toggled.connect(self._set_linking)
+        bar.addWidget(self.link_btn)
 
         self.record_btn = self._tool_button(
             record_icon("#A65A5A"), "Record", self._toggle_record, "recordBtn"
@@ -474,9 +492,13 @@ class MainWindow(QMainWindow):
         )
         self.loop_btn.setCheckable(True)
         bar.addWidget(self.loop_btn)
-        bar.addWidget(
-            self._future_button(metronome_icon(), "The metronome is not available yet")
+        # The metronome clicks the grid that plays: the drums' beats, or
+        # while blocks play, the bar they are fitted to (Ctrl+M).
+        self.metronome_btn = self._tool_button(
+            metronome_icon(), "Metronome: clicks on the drums' beats (Ctrl+M)", self._toggle_metronome
         )
+        self.metronome_btn.setCheckable(True)
+        bar.addWidget(self.metronome_btn)
 
         self.bpm = QDoubleSpinBox()
         self.bpm.setRange(30, 300)
@@ -748,6 +770,12 @@ class MainWindow(QMainWindow):
         self._action(view_menu, "Sprite Animation &Editor…", self._open_sprite_editor)
         self._action(view_menu, "Heart &Dancer", self._restore_heart_dancer)
         view_menu.addSeparator()
+        self.link_action = QAction("Show Link Line", self, checkable=True)
+        self.link_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        self.link_action.setToolTip("Join the selected tracks' shared ▶ with the yellow line")
+        self.link_action.toggled.connect(self.link_btn.setChecked)
+        self.link_btn.toggled.connect(self.link_action.setChecked)
+        view_menu.addAction(self.link_action)
         self.second_canvas_action = QAction("Second Canvas", self)
         self.second_canvas_action.setCheckable(True)
         self.second_canvas_action.setShortcut(QKeySequence("Ctrl+Shift+2"))
@@ -883,12 +911,23 @@ class MainWindow(QMainWindow):
 
         audio_menu = self.menuBar().addMenu("&Audio")
         self._action(audio_menu, "Play", self._play_hovered)
+        self._action(audio_menu, "Play / Pause Selection", self._toggle_group, QKeySequence("Shift+Space"))
+        self.selected_only_action = QAction("Pause && Stop Selected Only", self, checkable=True)
+        self.selected_only_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.selected_only_action.toggled.connect(self.selected_only_btn.setChecked)
+        self.selected_only_btn.toggled.connect(self.selected_only_action.setChecked)
+        self.selected_only_btn.toggled.connect(
+            lambda on: self.statusBar().showMessage(
+                "Pause and Stop act on the selected tracks only" if on else "Pause and Stop act on everything", 3000
+            )
+        )
+        audio_menu.addAction(self.selected_only_action)
         self.play_both_action = self._action(audio_menu, "Play Both Canvases", lambda: self._play())
-        self._action(audio_menu, "Pause", self._pause)
-        self._action(audio_menu, "Stop", self._stop)
+        self._action(audio_menu, "Pause", self._pause_pressed)
+        self._action(audio_menu, "Stop", self._stop_pressed)
         self._action(audio_menu, "Playing Voices…", self._show_voice_report)
         self._action(audio_menu, "Audio Diagnostics…", self._show_diagnostics)
-        self._action(audio_menu, "Return to Start", self._return_to_start)
+        self._action(audio_menu, "Return to Start", self._return_to_start, QKeySequence("Home"))
         audio_menu.addSeparator()
         self._action(audio_menu, "Record", self._toggle_record)
         self._action(audio_menu, "Input Device…", self._choose_input)
@@ -906,8 +945,12 @@ class MainWindow(QMainWindow):
                 QKeySequence(loop_shortcut(intervals, settings)),
             )
             self.loop_actions.append(action)
+        self._action(audio_menu, "Toggle Loop", self._toggle_loop, QKeySequence("Ctrl+L"))
         self._action(audio_menu, "Clear Loop", self._clear_loop)
-        audio_menu.addAction(self._unavailable_action("Metronome"))
+        self.metronome_action = QAction("Metronome", self, checkable=True)
+        self.metronome_action.setShortcut(QKeySequence("Ctrl+M"))
+        self.metronome_action.triggered.connect(lambda _checked: self._toggle_metronome())
+        audio_menu.addAction(self.metronome_action)
 
         bars_menu = self.menuBar().addMenu("&Bars")
         self._action(
@@ -990,6 +1033,7 @@ class MainWindow(QMainWindow):
             timeline.rename_requested.connect(self._rename_track_at)
             timeline.canvas_move_requested.connect(self._move_track_to_canvas)
             timeline.group_picks = lambda view=timeline: self._canvas_group(view)
+            timeline.confirm_clear = self._confirm_unselect_all
             timeline.downbeat_lines = self._downbeat_grid
             timeline.selection_units = lambda: len(self.selection_registry.ids)
             timeline.group_playing = self._group_playing
@@ -1027,8 +1071,10 @@ class MainWindow(QMainWindow):
             headers.selected.connect(self._select_track)
             headers.gain_changed.connect(self._set_gain)
             headers.pan_changed.connect(self._set_pan)
-            headers.mute_changed.connect(self._set_muted)
-            headers.solo_changed.connect(self._set_solo)
+            # A row's header speaks for every clip on that row (pieces moved
+            # onto it share its lane; only the first has a header you see).
+            headers.mute_changed.connect(lambda index, on: self._set_row(index, on, self._set_muted))
+            headers.solo_changed.connect(lambda index, on: self._set_row(index, on, self._set_solo))
             headers.arm_changed.connect(self._set_armed)
             headers.edit_finished.connect(self._commit_edit)
             headers.resize_committed.connect(self._on_track_resized)
@@ -1097,6 +1143,8 @@ class MainWindow(QMainWindow):
                 QApplication.focusWidget(), (QLineEdit, QAbstractSpinBox, QComboBox)
             ):
                 return False
+            if not self._confirm_unselect_all():
+                return True  # kept: nothing stops, nothing is unselected
             playing = self.engine.playing or bool(self.engine.previews())
             if playing:
                 self._stop()
@@ -1111,7 +1159,10 @@ class MainWindow(QMainWindow):
             if isinstance(focused, (QLineEdit, QAbstractSpinBox, QComboBox)):
                 return False
             if not event.isAutoRepeat():
-                self._toggle_transport()
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self._toggle_group()  # Shift+Space: the selection's shared ▶ / ⏸
+                else:
+                    self._toggle_transport()
             return True
         if event_type == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Delete:
             if QApplication.activeModalWidget() is not None:
@@ -1195,7 +1246,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_transport(self):
         if self.engine.playing and self._track_focus is None:
-            self._pause()
+            self._pause_pressed()
         else:
             self._play_hovered()
 
@@ -1743,8 +1794,41 @@ class MainWindow(QMainWindow):
         self._commit_edit()
         self._refresh_browser()
 
+    def _drum_grid(self) -> list[float] | None:
+        """The drums' downbeats in arrangement seconds (the lead's bars), or
+        None without a drum track that has them."""
+        drum = self._drum_index()
+        if drum is None:
+            return None
+        lines = self._downbeat_grid_preview(self.project.tracks[drum])  # reading only: no recut bookkeeping
+        return lines if lines and len(lines) >= 2 else None
+
+    def _drum_bar_at(self, grid, seconds: float):
+        """``(bar start, bar length)`` of the drums' bar holding ``seconds``,
+        the last bar's length carried on past the drums' end; None before
+        the first downbeat."""
+        if seconds < grid[0]:
+            return None
+        index = bisect.bisect_right(grid, seconds) - 1
+        if index < len(grid) - 1:
+            return grid[index], grid[index + 1] - grid[index]
+        step = grid[-1] - grid[-2]
+        laps = int((seconds - grid[-1]) // step)
+        return grid[-1] + laps * step, step
+
     def _musical_position(self, seconds):
-        """Bar and beat at ``seconds``, from the session timeline."""
+        """Bar and beat at ``seconds``. The beat is counted on the drums'
+        own bars (they lead), the bar number from the session timeline, so
+        it reads like the ruler; without drums, both from the timeline."""
+        grid = self._drum_grid()
+        held = self._drum_bar_at(grid, float(seconds)) if grid else None
+        if held is not None:
+            start, step = held
+            numerator, _denominator = parse_time_signature(self.signature.currentText())
+            beat = min(numerator, int((float(seconds) - start) / (step / numerator)) + 1)
+            timeline = self.session_timeline
+            bar = timeline.tick_to_position(timeline.seconds_to_tick(max(0.0, start + 1e-3))).bar
+            return f"{max(0, bar):03d}.{max(1, beat)}"
         timeline = self.session_timeline
         position = timeline.tick_to_position(timeline.seconds_to_tick(max(0.0, float(seconds))))
         return f"{max(0, position.bar):03d}.{position.beat}"
@@ -1945,6 +2029,43 @@ class MainWindow(QMainWindow):
             self.frame_timer.start()
         self._sync_transport_lamp()
 
+    def _linking(self) -> bool:
+        return bool(getattr(self, "link_btn", None) and self.link_btn.isChecked())
+
+    def _set_linking(self, on: bool) -> None:
+        for view in self._timelines():
+            view.show_link = bool(on)
+            view._update_combined_play()
+        self.statusBar().showMessage("Yellow link line shown" if on else "Yellow link line hidden", 3000)
+
+    def _scope_keys(self) -> list | None:
+        """With "Selected" on and blocks playing: the playing members of
+        the selection, which Pause, Stop and Space then act on alone. None
+        otherwise (they act on everything)."""
+        if not self.selected_only_btn.isChecked() or not self._members_active():
+            return None
+        members = self.engine.members or {}
+        keys = [key for key in self._group_members() if key in members]
+        return keys or None
+
+    def _pause_pressed(self) -> None:
+        keys = self._scope_keys()
+        if keys is None:
+            self._pause()
+            return
+        for key in keys:
+            self._hold_member(key, True)  # the others play on
+        self._sync_previews()
+
+    def _stop_pressed(self) -> None:
+        keys = self._scope_keys()
+        if keys is None:
+            self._stop()
+            return
+        for key in keys:
+            if key in (self.engine.members or {}):
+                self._remove_member(key)  # the others play on
+
     def _pause(self):
         # The one clock stops: every block member holds where it is.
         self.engine.pause()
@@ -2023,16 +2144,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Loop off", 3000)
 
     def _toggle_loop(self) -> None:
-        if self._members_active():
-            # Blocks play: the button turns their own looping on or off, at
-            # once, for every playing block. Each keeps its place.
-            self._block_loop = not self._block_loop
-            self._sync_member_loop()
-            self._set_loop_button(self._block_loop)
-            self.statusBar().showMessage(
-                "Blocks loop, each on its own" if self._block_loop else "Blocks play to their own end", 3000
-            )
-            return
         if self.engine.loop is not None:
             self.engine.clear_loop()
             for timeline in self._timelines():
@@ -2323,6 +2434,20 @@ class MainWindow(QMainWindow):
         if indices:
             self._on_track_selected(min(indices))  # the clip commands act on it
 
+    def _confirm_unselect_all(self) -> bool:
+        """Ask before everything is unselected (a click on empty canvas, or
+        Esc): unselected blocks stop playing. True with nothing selected."""
+        if not any(view.selected_indices() or view.picks() for view in self._timelines()):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Unselect all",
+            "Unselect every selected track and block?\nBlocks that are unselected stop playing.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def _deselect_all(self) -> bool:
         """Clear the selected clips and picked blocks on both canvases, and
         stop the paused blocks (their grey tint and line go). Blocks still
@@ -2477,6 +2602,32 @@ class MainWindow(QMainWindow):
         if index == self._selected:
             self.inspector.set_muted(muted)
             self._sync_clip_actions()
+        self._commit_edit()
+
+    def _row_mates(self, index: int) -> list[int]:
+        """Every track on the same row as track ``index`` (itself first)."""
+        tracks = self.project.tracks
+        if not (0 <= index < len(tracks)):
+            return [index]
+        rows, _primaries = self._view_for(index).lane_rows(tracks)
+        row = rows[index] if index < len(rows) else -1
+        if row < 0:
+            return [index]
+        return [index] + [other for other, at in enumerate(rows) if at == row and other != index]
+
+    def _set_row(self, index: int, on: bool, setter) -> None:
+        """Mute or solo a row: every clip on it, as one undo step."""
+        mates = self._row_mates(index)
+        if len(mates) == 1:
+            setter(index, on)
+            return
+        self._remember_edit()
+        frozen, self._history_frozen = self._history_frozen, True  # each clip's own edit is part of this one
+        try:
+            for mate in mates:
+                setter(mate, on)
+        finally:
+            self._history_frozen = frozen
         self._commit_edit()
 
     def _set_solo(self, index, solo):
@@ -4478,9 +4629,56 @@ class MainWindow(QMainWindow):
         self._cut_grids[id(track)] = tuple(grid or ())
         return grid
 
+    def _toggle_metronome(self) -> None:
+        on = not self.engine.metronome
+        self.engine.set_metronome(on)
+        self.metronome_btn.setChecked(on)
+        self.metronome_action.setChecked(on)
+        self.metronome_btn.setIcon(metronome_icon("#D7B36A" if on else "#5E6772"))
+        if on:
+            self._push_metronome_grid()
+            self._push_member_meter()
+        self.statusBar().showMessage("Metronome on" if on else "Metronome off", 2000)
+
+    def _push_metronome_grid(self) -> None:
+        """The beats the metronome clicks while the arrangement plays: the
+        drums' bars cut into beats (accent on each downbeat), carried on to
+        the end of the song; without drums, the session timeline's beats."""
+        numerator, _denominator = parse_time_signature(self.signature.currentText())
+        tracks = self.project.tracks
+        until = max(
+            (float(t.get("start", 0.0) or 0.0) + float(t.get("duration", 0.0) or 0.0) for t in tracks), default=0.0
+        ) + 4.0
+        beats, accents = [], []
+        grid = self._drum_grid()
+        if grid:
+            lines = list(grid)
+            step = lines[-1] - lines[-2]
+            while lines[-1] < until and step > 0:
+                lines.append(lines[-1] + step)
+            for a, b in zip(lines, lines[1:]):
+                for k in range(numerator):
+                    beats.append(int(round((a + (b - a) * k / numerator) * OUTPUT_RATE)))
+                    accents.append(k == 0)
+        else:
+            for seconds, downbeat in self.session_timeline.get_beat_lines(until):
+                beats.append(int(round(float(seconds) * OUTPUT_RATE)))
+                accents.append(bool(downbeat))
+        order = sorted(range(len(beats)), key=beats.__getitem__)
+        self.engine.set_metronome_grid([beats[i] for i in order], [accents[i] for i in order])
+
+    def _push_member_meter(self) -> None:
+        """While blocks play the metronome counts the bar they are fitted
+        to, one beat of it apart, from where their playback began."""
+        numerator, _denominator = parse_time_signature(self.signature.currentText())
+        bar = self._member_bar
+        self.engine.set_member_meter(bar / numerator if bar else None, numerator)
+
     def _apply_detected_beats(self) -> None:
         visible = self.timeline.show_detected
         tracks = self.project.tracks
+        if self.engine.metronome:
+            self._push_metronome_grid()  # the drums' beats may have moved
         if not self._canvases_rebuilding and any(
             id(track) in self._cut_grids
             and self._cut_grids[id(track)] != tuple(self._downbeat_grid_preview(track) or ())
@@ -5093,7 +5291,8 @@ class MainWindow(QMainWindow):
         """Play / Space: every member plays on, or every picked block
         starts. False when neither applies (the song plays)."""
         if self._members_active():
-            for key in list(self.playback_registry.playing_blocks):
+            scope = self._scope_keys()
+            for key in list(self.playback_registry.playing_blocks) if scope is None else scope:
                 self._hold_member(key, False)
             self._run_clock()
             return True
@@ -5339,7 +5538,11 @@ class MainWindow(QMainWindow):
                 rate=entry[7],
             ))
         self._update_member_blocks()
-        self._set_loop_button(self._block_loop)  # the button shows the blocks' looping now
+        if not self._member_bar and self._members_active():
+            # The first blocks of this playback set the bar for everything
+            # after: joins, resumes and the metronome all keep to it.
+            self._member_bar = getattr(self, "_last_chain_bar", None)
+            self._push_member_meter()
         if play:
             self._run_clock()
         self._sync_previews()
@@ -5380,15 +5583,20 @@ class MainWindow(QMainWindow):
                 else:
                     runs.append([first, end, [identity], track])
             groups.append(runs)
-        lone = len(groups) == 1 and len(groups[0]) == 1
-        bar = None if lone else self._lead_bar_frames(groups)
-        drum = self._drum_index()
+        # Every block is fitted to one bar, a lone one too: a block played on
+        # its own ▶ loops on whole drum bars, so one that joins later, or that
+        # others join, stays on the same grid instead of drifting by the few
+        # samples its own length is off a bar on every pass.
+        bar = self._lead_bar_frames(groups)
+        self._last_chain_bar = bar
         chained = {}
         for runs in groups:
             natural = sum(end - first for first, end, _ids, _track in runs)
             rate, cycle = 1.0, natural
-            leads = drum is not None and any(track == drum for *_rest, track in runs)
-            if bar and not leads:
+            # The drums set the bar (their length over their whole bars), so
+            # fitting leaves them at exactly their own speed; they only
+            # change speed when they join a bar locked before them.
+            if bar:
                 bars = max(1, int(round(natural / bar)))
                 fitted = natural / (bars * bar)
                 if abs(fitted - 1.0) <= self.MAX_FIT:
@@ -5407,6 +5615,14 @@ class MainWindow(QMainWindow):
         return chained
 
     def _lead_bar_frames(self, groups) -> float | None:
+        """The bar every block is fitted to: the one locked when this
+        playback began, so all of it keeps one grid; else worked out now
+        (see _measure_lead_bar)."""
+        if self._members_active() and self._member_bar:
+            return self._member_bar
+        return self._measure_lead_bar(groups)
+
+    def _measure_lead_bar(self, groups) -> float | None:
         """One bar of the lead, in frames: the drums' own selected row when
         it is in the selection (its length over its whole bars, so the drums
         play as recorded), else the drums' downbeat spacing, else the
@@ -5530,6 +5746,7 @@ class MainWindow(QMainWindow):
             self.engine.seek(origin / OUTPUT_RATE)
         self.playback_registry.stop()
         self._member_blocks = {}
+        self._member_bar = None
         self._set_loop_button(self.engine.loop is not None)  # the arrangement's loop again
         self._sync_previews()
         self._sync_transport_lamp()
@@ -6210,8 +6427,13 @@ class MainWindow(QMainWindow):
         self._show_stem_loops()
         count = sum(len(entry[2]) for entry in regions.values())
         start, end, _members = next(iter(regions.values()))
+        units = self._group_units()
+        if units and (not self.engine.playing or self._members_active()):
+            # Repeat means play it now: the selection loops, on the shared
+            # clock, joining what already plays.
+            self._start_member_entries(units)
         self.statusBar().showMessage(
-            f"{count} stem{'s' if count != 1 else ''} loop {start:.2f}–{end:.2f} s in sync. Press ▶ on any of them", 6000
+            f"{count} stem{'s' if count != 1 else ''} loop {start:.2f}–{end:.2f} s in sync", 6000
         )
 
     def _remove_from_stem_loop(self, index: int) -> None:
@@ -7086,9 +7308,9 @@ class MainWindow(QMainWindow):
             "SonicLab\n\n"
             "A multitrack arrangement desk.\n\n"
             "Import, playback, clip editing, undo, recording, the mixer, "
-            "beat detection, downbeat looping, and the spectrum, scope, and "
-            "spectrogram views are active.\n\n"
-            "The metronome, effects, and the sample library are not available yet.",
+            "beat detection, downbeat looping, the metronome, and the spectrum, "
+            "scope, and spectrogram views are active.\n\n"
+            "Effects and the sample library are not available yet.",
         )
 
     def showEvent(self, event):

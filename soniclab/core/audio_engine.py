@@ -254,6 +254,14 @@ def mix_clip_rate_into(out, clip, start: float, rate: float, end: int) -> float:
     return float(max(np.max(np.abs(left)), np.max(np.abs(right))))
 
 
+def _click(frequency: float, level: float):
+    """A short metronome click: a sine that dies away in 30 ms, stereo."""
+    count = int(0.03 * OUTPUT_RATE)
+    t = np.arange(count, dtype=np.float32) / OUTPUT_RATE
+    wave = (np.sin(2.0 * np.pi * frequency * t) * np.exp(-t * 160.0) * level).astype(np.float32)
+    return np.stack([wave, wave], axis=1)
+
+
 def render_clips(clips, start, frames, output_gain=1.0, master_muted=False, include=None):
     """Mix ``frames`` samples from arrangement frame ``start``, offline.
 
@@ -349,6 +357,17 @@ class AudioEngine:
         # Seconds from writing a block to hearing it, as the last callback
         # measured it (see _sounds_at); read by output_delay.
         self._output_delay = 0.0
+        # The metronome: clicks mixed in this callback on the transport's own
+        # frames. While blocks play it counts the grid they keep to (from
+        # where member playback began, one beat of the locked bar apart);
+        # otherwise the beats it was given in arrangement frames.
+        self._metro_on = False
+        self._metro_beats = np.zeros(0, dtype=np.int64)
+        self._metro_accents = np.zeros(0, dtype=bool)
+        self._metro_member_beat = None
+        self._metro_per_bar = 4
+        self._click_accent = _click(1760.0, 0.55)
+        self._click_beat = _click(1175.0, 0.35)
 
     @property
     def position(self):
@@ -799,6 +818,63 @@ class AudioEngine:
                 filled += span
         return peak
 
+    # -- metronome ----------------------------------------------------------
+
+    def set_metronome(self, enabled: bool) -> None:
+        with self._lock:
+            self._metro_on = bool(enabled)
+
+    @property
+    def metronome(self) -> bool:
+        return self._metro_on
+
+    def set_metronome_grid(self, beats, accents) -> None:
+        """The beats to click while the arrangement plays: arrangement
+        frames, sorted, and whether each is a bar's first beat."""
+        beats = np.asarray(beats, dtype=np.int64)
+        accents = np.asarray(accents, dtype=bool)
+        with self._lock:
+            self._metro_beats, self._metro_accents = beats, accents
+
+    def set_member_meter(self, beat_frames, per_bar: int) -> None:
+        """One beat (frames, fractional) of the bar playing blocks keep to,
+        and beats per bar: the metronome's grid while blocks play."""
+        with self._lock:
+            self._metro_member_beat = None if not beat_frames else float(beat_frames)
+            self._metro_per_bar = max(1, int(per_bar))
+
+    def _mix_metronome(self, outdata, segments) -> None:
+        """Clicks that sound in this block (one that began just before it
+        rings on into it). Lock held."""
+        filled = 0
+        click_len = len(self._click_beat)
+        member = self._member_origin is not None and self._metro_member_beat
+        for seg_position, span in segments:
+            low, high = seg_position - click_len, seg_position + span
+            if member:
+                beat = self._metro_member_beat
+                origin = self._member_origin
+                first = int(math.ceil((low - origin) / beat))
+                last = int(math.floor((high - 1 - origin) / beat))
+                clicks = [
+                    (int(round(origin + k * beat)), k % self._metro_per_bar == 0)
+                    for k in range(max(0, first), last + 1)
+                ]
+            else:
+                beats = self._metro_beats
+                a = int(np.searchsorted(beats, low, side="left"))
+                b = int(np.searchsorted(beats, high, side="left"))
+                clicks = [(int(beats[i]), bool(self._metro_accents[i])) for i in range(a, b)]
+            for at, accent in clicks:
+                click = self._click_accent if accent else self._click_beat
+                offset = at - seg_position
+                src = max(0, -offset)
+                dst = max(0, offset)
+                count = min(len(click) - src, span - dst)
+                if count > 0:
+                    outdata[filled + dst : filled + dst + count] += click[src : src + count]
+            filled += span
+
     def set_loop(self, start_seconds, end_seconds) -> bool:
         """Loop in arrangement samples. The end is exclusive."""
         start = int(round(float(start_seconds) * OUTPUT_RATE))
@@ -960,6 +1036,8 @@ class AudioEngine:
                 self._track_peaks[index] = peak
             if scratch is not None:
                 self._track_rings[index].push(scratch)
+        if self._metro_on:
+            self._mix_metronome(outdata, segments)
         self._position = next_position
 
     def _mix_voices(self, outdata, frames: int, sounds_at: float) -> None:

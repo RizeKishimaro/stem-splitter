@@ -1622,6 +1622,11 @@ class TimelineView(QGraphicsView):
         # or more share one ▶.
         self.selection_units = None
         self.group_playing = None
+        # From the window: asked before a click on empty canvas unselects
+        # everything; False keeps the selection.
+        self.confirm_clear = None
+        # Whether the shared ▶ of linked rows are joined by the yellow line.
+        self.show_link = False
         self._ghosts: list = []  # outlines of dragged items shown on this canvas
         self._block_ghost = None
         self._block_drag = None
@@ -2925,7 +2930,7 @@ class TimelineView(QGraphicsView):
             button.set_playing(playing)
             button.setVisible(True)
         link = self._combined_link
-        if len(spots) > 1:
+        if len(spots) > 1 and self.show_link:
             # Right angles from button to button: down out of one, across in
             # the gap above the next row's block, down into the next button.
             path = QPainterPath()
@@ -3334,7 +3339,7 @@ class TimelineView(QGraphicsView):
                 self._band_kept = None
                 if not event.modifiers() & (
                     Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-                ):
+                ) and (self.confirm_clear is None or self.confirm_clear()):
                     self.set_picks({})
                     self.scene_obj.clearSelection()
                 self.seek_requested.emit(max(0.0, (origin.x() - HEADER_WIDTH) / self.pixels_per_second))
