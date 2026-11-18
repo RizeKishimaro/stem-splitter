@@ -40,6 +40,7 @@ TRACK_SEGMENT = "segment"  # a stretch of an original or stem (a bar, a split ha
 
 PLAYING = "playing"
 PAUSED = "paused"
+COMPLETED = "completed"
 
 
 def new_id(prefix: str) -> str:
@@ -457,47 +458,68 @@ class SelectionRegistry:
         self.ids = [identity for identity in self.ids if alive(identity)]
 
 
+@dataclass
+class PlayingBlockState:
+    """One block that is playing (or paused, or played out) on the
+    transport's clock. Frames are the source asset's own, at the output
+    rate; ``global_start`` is the transport sample its first frame sounds
+    at; ``source_cursor`` is where it was last seen."""
+
+    id: str
+    source_id: str | None
+    source_start: int
+    source_end: int
+    state: str = PLAYING
+    source_cursor: int = 0
+    rate: float = 1.0
+    global_start: int = 0
+    loop: bool = False
+
+
 class PlaybackRegistry:
-    """Segment ids the arrangement transport plays (or holds paused) as a
-    filtered selection. A record, not a voice: the mixer plays them."""
+    """The blocks actually playing: ``playing_blocks``, by stable block or
+    node id. Selecting a block does not put it here; starting it does, and
+    its own stop, its end, unselecting it (the window does that), or the
+    main Stop take it out. A record, not a player: the mixer plays them,
+    each on the one transport clock."""
 
     def __init__(self):
-        self.states: dict[str, str] = {}
+        self.playing_blocks: dict[str, PlayingBlockState] = {}
+
+    @property
+    def states(self) -> dict[str, str]:
+        return {key: block.state for key, block in getattr(self, "playing_blocks", {}).items()}
 
     def playing(self) -> list[str]:
-        return [node_id for node_id, state in self.states.items() if state == PLAYING]
+        return [key for key, block in self.playing_blocks.items() if block.state == PLAYING]
 
-    def start(self, ids) -> None:
-        self.states = {node_id: PLAYING for node_id in dict.fromkeys(ids)}
+    def add(self, block: PlayingBlockState) -> None:
+        """One more block; the others are left exactly as they are."""
+        self.playing_blocks[block.id] = block
 
-    def pause(self) -> None:
-        self.states = {node_id: PAUSED for node_id in self.states}
+    def set_state(self, key: str, state: str) -> None:
+        block = self.playing_blocks.get(key)
+        if block is not None:
+            block.state = state
 
-    def resume(self) -> None:
-        self.states = {node_id: PLAYING for node_id in self.states}
-
-    def remove(self, node_id: str) -> None:
-        self.states.pop(node_id, None)
+    def remove(self, key: str) -> None:
+        self.playing_blocks.pop(key, None)
 
     def stop(self) -> None:
-        self.states.clear()
+        self.playing_blocks.clear()
 
-    def reconcile(self, registry: TrackRegistry, selection: SelectionRegistry) -> None:
-        """A segment that is inactive or no longer selected stops playing.
-        A logical block lives while the node it is a stretch of does."""
+    def reconcile(self, registry: TrackRegistry, selection: SelectionRegistry | None = None) -> None:
+        """A block whose node is gone stops playing. Selection has no say
+        (see the class doc); the argument is kept for callers. A logical
+        block lives while the node it is a stretch of does, or while that
+        node lives on in active pieces (a move or split cut it up)."""
         def alive(identity: str) -> bool:
             node = registry.get(block_node(identity) if is_block_id(identity) else identity)
-            return node is not None and node.active
+            if node is None:
+                return False
+            return node.active or any(child.active for child in registry.descendants(node.id))
 
-        self.states = {
-            identity: state for identity, state in self.states.items()
-            if alive(identity) and identity in selection
-        }
-
-    def reconcile_selection(self, selection: SelectionRegistry) -> None:
-        """What left the selection leaves playback (its record; the mixer
-        filter follows from the same selection)."""
-        self.states = {identity: state for identity, state in self.states.items() if identity in selection}
+        self.playing_blocks = {key: block for key, block in self.playing_blocks.items() if alive(key)}
 
 
 class Transaction:

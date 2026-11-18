@@ -1,4 +1,5 @@
 import bisect
+import math
 import os
 import tempfile
 import time
@@ -68,11 +69,14 @@ from soniclab.core.bar_map import (
 from soniclab.core.drums import pick_drum_track
 from soniclab.core.session_timeline import ORIGIN_DOWNBEATS, ORIGIN_MANUAL, ORIGIN_MIGRATED_DOWNBEATS, SessionTimeline
 from soniclab.core.track_registry import (
+    PAUSED as PLAYBACK_PAUSED,
+    PLAYING as PLAYBACK_PLAYING,
     TRACK_ORIGINAL,
     TRACK_SEGMENT,
     TRACK_STEM,
     ActionHistory,
     PlaybackRegistry,
+    PlayingBlockState,
     SelectionRegistry,
     TrackRegistry,
     block_frames,
@@ -301,11 +305,19 @@ class MainWindow(QMainWindow):
         self.action_history = ActionHistory()
         # Selection playback through the transport: the blocks it plays, by
         # track identity and bar (indices change), and the loop it set.
-        self._selection_play_ids: set[str] = set()
         self._projecting = False  # drawing the registry's selection on the canvases
-        self._selection_play_loop = None
-        self._following_selection = False
-        self._selection_edit_pending = False
+        # Where each playing block is now: identity -> (track, bar).
+        self._member_blocks: dict = {}
+        # The selection before the current burst of edits (see
+        # _follow_selection), or None between bursts.
+        self._selection_before = None
+        # The downbeat grid each track was last cut on, by track identity, so
+        # new beat results recut the blocks once (see _apply_detected_beats).
+        self._cut_grids: dict = {}
+        # Whether playing blocks loop, each within its own stretch. The loop
+        # button sets it while blocks play; the arrangement's loop region
+        # has no say in it.
+        self._block_loop = True
         self._moved_ids: set[int] = set()  # tracks a drag just moved, by identity
         self._build_arrangement()
         self._build_transport()
@@ -977,6 +989,11 @@ class MainWindow(QMainWindow):
             timeline.downbeat_clicked.connect(self._show_bar_menu)
             timeline.rename_requested.connect(self._rename_track_at)
             timeline.canvas_move_requested.connect(self._move_track_to_canvas)
+            timeline.group_picks = lambda view=timeline: self._canvas_group(view)
+            timeline.downbeat_lines = self._downbeat_grid
+            timeline.selection_units = lambda: len(self.selection_registry.ids)
+            timeline.group_playing = self._group_playing
+            timeline.group_play_requested.connect(self._toggle_group)
             timeline.blocks_move_requested.connect(
                 lambda blocks, grabbed, shift, canvas, row, view=timeline: self._move_blocks(
                     view, blocks, grabbed, shift, canvas, row
@@ -1184,7 +1201,10 @@ class MainWindow(QMainWindow):
 
     def _play_hovered(self) -> None:
         """Play the canvas the mouse is (or was last) over, from its own
-        playhead. With one canvas this is plain Play."""
+        playhead. With one canvas this is plain Play. With blocks picked (or
+        playing) it plays those blocks instead (see _play_members)."""
+        if self._play_members():
+            return
         if not self.splitter2.isVisible():
             self._clear_track_focus()
             self._play(keep_focus=True)
@@ -1562,7 +1582,7 @@ class MainWindow(QMainWindow):
             self._prune_previews()
         self._sync_registry()
         self._project_selection()  # the canvases show the registry's selection, at the new indices
-        self._refresh_selection_filter()
+        self._refresh_members()
 
     def _canvas_layout_changed(self) -> None:
         # While _refresh_timeline rebuilds both canvases it lays the panels
@@ -1699,6 +1719,8 @@ class MainWindow(QMainWindow):
                     track["_audio"] = audio
                 self.engine.add_clip(audio, float(track.get("start", 0.0)))
                 self._push_mix(index, track)
+            if self.engine.members:
+                self._place_members_on_tracks()  # same batch: never heard on a stale clip index
             if self._preview_tracks:
                 self._follow_preview_tracks()
                 self._push_stem_mutes()
@@ -1741,7 +1763,28 @@ class MainWindow(QMainWindow):
 
     def _shown_position(self, playing: bool) -> float:
         # Playing: what the speakers play now, between audio blocks too.
-        return self.engine.heard_position() if playing else self.engine.position
+        seconds = self.engine.heard_position() if playing else self.engine.position
+        lead = self._lead_member_seconds(seconds)
+        return seconds if lead is None else lead
+
+    def _lead_member_seconds(self, seconds: float) -> float | None:
+        """While blocks play, the clock, bar counter and ruler playhead show
+        what plays, not the transport's running count: the arrangement time
+        of the block that has played longest (the first started, then the
+        top track), at transport time ``seconds``. None when no block sounds."""
+        members = self.engine.members
+        if not members:
+            return None
+        position = int(round(float(seconds) * OUTPUT_RATE))
+        best = None
+        for entry in members.values():
+            offset = AudioEngine.member_offset(entry, position)
+            if offset is None:
+                continue
+            rank = (entry[3], entry[0])
+            if best is None or rank < best[0]:
+                best = (rank, (entry[1] + offset) / OUTPUT_RATE)
+        return None if best is None else best[1]
 
     def _update_playheads(self) -> tuple[bool, float]:
         """Move each canvas's playhead; the canvases themselves stay put."""
@@ -1759,7 +1802,47 @@ class MainWindow(QMainWindow):
             if moving:
                 self._canvas_positions[canvas] = seconds
             timeline.set_playhead(self._canvas_positions[canvas])
+        self._update_transport_cursors(playing)
         return playing, seconds
+
+    def _update_transport_cursors(self, playing: bool) -> None:
+        """While the song plays, each block it plays shows its own cursor,
+        placed from the one transport position (no clock of its own).
+        Members show theirs with their ▶ / ⏸ (see _sync_previews). The
+        canvas line is the ruler handle only, always."""
+        lanes = None if self._members_active() else self._transport_lanes(playing)
+        for timeline in self._timelines():
+            if lanes is None:
+                timeline.set_transport_cursors(None, None)
+            else:
+                timeline.set_transport_cursors(self._canvas_positions[timeline.canvas], lanes.get(timeline, {}))
+            if getattr(timeline, "_playhead_bands", None) != []:
+                timeline.set_playhead_bands([])
+
+    def _transport_lanes(self, playing: bool):
+        """``{view: {track index: bars or None}}`` of the blocks that show
+        the transport cursor, or None for no cursors (the full line): while
+        the arrangement plays, every block of every clip that is heard.
+        Stopped, or a block auditioning on its own: none."""
+        if not playing:
+            return None
+        tracks = self.project.tracks
+        focus = self._track_focus
+        focused = tracks[focus] if focus is not None and 0 <= focus < len(tracks) else None
+        heard = []
+        for index, track in enumerate(tracks):
+            if self._canvas_focus is not None and track_canvas(track) != self._canvas_focus:
+                continue
+            if focused is not None and track is not focused:
+                continue
+            if not track.get("muted", False):
+                heard.append((index, track))
+        if any(track.get("solo", False) for _index, track in heard):
+            heard = [(index, track) for index, track in heard if track.get("solo", False)]
+        lanes: dict = {}
+        for index, _track in heard:
+            lanes.setdefault(self._view_for(index), {})[index] = None
+        return lanes
 
     def _animate_playheads(self) -> None:
         """One playhead frame. Reads the engine's snapshot; never waits on audio."""
@@ -1767,9 +1850,10 @@ class MainWindow(QMainWindow):
         dt = min(0.1, now - self._last_frame) if self._last_frame else PLAYHEAD_FRAME_MS / 1000.0
         self._last_frame = now
         self._frame_times.append(now)
+        self._retire_completed_members()
         shown = self._update_playheads()
         playing = shown[0]
-        previews = self._sync_previews() if (self._preview_tracks or self.engine.previews()) else {}
+        previews = self._sync_previews() if (self._preview_tracks or self.engine.previews() or self.engine.members) else {}
         if not playing and not previews:
             self.frame_timer.stop()
             self._last_frame = 0.0
@@ -1851,8 +1935,6 @@ class MainWindow(QMainWindow):
             self.engine.preview_stop_all()
             self._preview_tracks.clear()
             self._sync_previews()
-        if self._selection_play_active():
-            self.playback_registry.resume()  # the selection plays on from the shared transport position
         try:
             self.engine.play()
         except Exception as exc:
@@ -1864,15 +1946,16 @@ class MainWindow(QMainWindow):
         self._sync_transport_lamp()
 
     def _pause(self):
+        # The one clock stops: every block member holds where it is.
         self.engine.pause()
-        self.playback_registry.pause()
+        self._sync_previews()
         self._sync_transport_lamp()
         self._sync_canvas_play_buttons()
 
     def _stop(self):
-        # Stop is the panic button: the song and every stem block. The
-        # selection's playback ends too; the selection itself stays.
-        self._stop_selection_play()
+        # Stop is the panic button: the song and every stem block. Every
+        # playing block stops too; the selection itself stays.
+        self._end_members()
         self.engine.preview_stop_all()
         self._sync_previews()
         self.engine.stop()
@@ -1917,7 +2000,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Could not set the loop region", 4000)
             return
         bounds = self.engine.loop
-        if bounds is not None:
+        if bounds is not None and not self._members_active():
             position = self.engine.position
             if position < bounds[0] or position >= bounds[1]:
                 self.engine.seek(bounds[0])
@@ -1940,6 +2023,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Loop off", 3000)
 
     def _toggle_loop(self) -> None:
+        if self._members_active():
+            # Blocks play: the button turns their own looping on or off, at
+            # once, for every playing block. Each keeps its place.
+            self._block_loop = not self._block_loop
+            self._sync_member_loop()
+            self._set_loop_button(self._block_loop)
+            self.statusBar().showMessage(
+                "Blocks loop, each on its own" if self._block_loop else "Blocks play to their own end", 3000
+            )
+            return
         if self.engine.loop is not None:
             self.engine.clear_loop()
             for timeline in self._timelines():
@@ -2741,9 +2834,16 @@ class MainWindow(QMainWindow):
         _, target_primaries = target.lane_rows(tracks)
         hosts = [tracks[i] for i in target_primaries]
         base = source_rows[int(blocks[grabbed][0])]
+        # The top block of the group stops at the first row (as the drag
+        # preview showed): one row shift for all, so their layout is kept.
+        target_row = max(int(target_row), -min(source_rows[int(b[0])] - base for b in blocks))
         grouped: dict[int, list] = {}
         for index, local_start, local_duration, bar in blocks:
             grouped.setdefault(int(index), []).append((float(local_start), float(local_duration), int(bar)))
+        # One shift for all of them: the earliest stops at the timeline's
+        # start, so none is pushed on its own and their spacing is kept.
+        earliest = min(float(tracks[int(b[0])].get("start", 0.0) or 0.0) + float(b[1]) for b in blocks)
+        shift = max(float(shift), -earliest)
         self._remember_edit()
         try:
             self._move_block_pieces(
@@ -3157,7 +3257,7 @@ class MainWindow(QMainWindow):
         self.project = Project()
         self.session_timeline = SessionTimeline()
         self._freeze_drum_bars = False
-        self._stop_selection_play()
+        self._end_members()
         self.track_registry = TrackRegistry()
         self.selection_registry = SelectionRegistry()
         self.playback_registry = PlaybackRegistry()
@@ -4045,7 +4145,7 @@ class MainWindow(QMainWindow):
             heard = self._dancer_preview_time()
             if heard is not None:
                 return heard, bpm, self._dancer_downbeats(), None, True
-        seconds = self.engine.heard_position() if playing else float(self.engine.position)
+        seconds = self._shown_position(playing)  # what plays: the blocks, when blocks play
         return seconds, bpm, self._dancer_downbeats(), self.engine.loop, playing
 
     def _dancer_preview_time(self) -> float | None:
@@ -4360,9 +4460,37 @@ class MainWindow(QMainWindow):
         noun = "onset" if count == 1 else "onsets"
         return f"Detected {count} {noun}"
 
+    def _downbeat_grid(self, track: dict) -> list[float] | None:
+        """Where a track's blocks are cut: its downbeat markers (the
+        triangles: applied downbeats, else the drum track's, else its own
+        analysis) in arrangement seconds. Before the first marker the grid
+        steps back by the first bar's length, so the clip's opening is a
+        block too. None with fewer than two markers: the song's bars then."""
+        start = float(track.get("start", 0.0) or 0.0)
+        offset = float(track.get("offset", 0.0) or 0.0)
+        downs = sorted({round(start + float(time) - offset, 6) for time, position in self._track_events(track) if int(position) == 1})
+        grid = None
+        if len(downs) >= 2 and downs[1] - downs[0] > 0.05:
+            step = downs[1] - downs[0]
+            while downs[0] > start + 1e-4:
+                downs.insert(0, downs[0] - step)
+            grid = downs
+        self._cut_grids[id(track)] = tuple(grid or ())
+        return grid
+
     def _apply_detected_beats(self) -> None:
         visible = self.timeline.show_detected
         tracks = self.project.tracks
+        if not self._canvases_rebuilding and any(
+            id(track) in self._cut_grids
+            and self._cut_grids[id(track)] != tuple(self._downbeat_grid_preview(track) or ())
+            for track in tracks
+        ):
+            # New beat results moved the triangles: recut the blocks there,
+            # once, after this event.
+            if not getattr(self, "_recut_pending", False):
+                self._recut_pending = True
+                QTimer.singleShot(0, self._recut_blocks)
         for item in [*self.timeline.scene_obj.items(), *self.timeline2.scene_obj.items()]:
             if not isinstance(item, ClipItem) or not isValid(item):
                 continue
@@ -4375,6 +4503,20 @@ class MainWindow(QMainWindow):
                 float(track.get("offset", 0.0) or 0.0),
                 visible,
             )
+
+    def _recut_blocks(self) -> None:
+        self._recut_pending = False
+        self._refresh_timeline()
+
+    def _downbeat_grid_preview(self, track: dict):
+        """``_downbeat_grid`` without recording it."""
+        saved = self._cut_grids.get(id(track))
+        grid = self._downbeat_grid(track)
+        if saved is None:
+            self._cut_grids.pop(id(track), None)
+        else:
+            self._cut_grids[id(track)] = saved
+        return grid
 
     def _own_events(self, track: dict) -> tuple[tuple[float, int], ...]:
         """Applied downbeats when the track has them, else Madmom's result."""
@@ -4514,7 +4656,7 @@ class MainWindow(QMainWindow):
         """A loaded project's Track Registry and action history, as saved.
         An older project has none: its tracks get nodes on the next sync.
         Selection and playback are not restored: no voice starts by itself."""
-        self._stop_selection_play()
+        self._end_members()
         saved = self.project.registry or {}
         self.track_registry = TrackRegistry.from_dict(saved.get("tracks"))
         self.action_history = ActionHistory.from_dict(saved.get("history"))
@@ -4726,12 +4868,13 @@ class MainWindow(QMainWindow):
         """▶ / ⏸ on a block. On one of several selected blocks it plays the
         whole selection combined, as one loop; on any other block it plays
         just that block."""
-        chosen_blocks = self._selected_blocks()
-        # A stem in a synced loop (Repeat / Loop) plays that loop, even with
-        # its blocks still picked: the loop is the one the user just made.
+        # A stem in a synced loop (Repeat / Loop) plays that loop as its own
+        # voice; any other block is a member on the transport clock.
         synced = 0 <= track < len(self.project.tracks) and stem_loop(self.project.tracks[track]) is not None
-        if (track, bar) in chosen_blocks and len(chosen_blocks) > 1 and not synced:
-            self._toggle_selection_play(chosen_blocks)
+        if synced:
+            if self._toggle_stem_loop(track):
+                return
+        elif self._toggle_member(track, bar):
             return
         states = self.engine.previews()
         key = self._block_voice(track, bar, states)
@@ -4766,6 +4909,16 @@ class MainWindow(QMainWindow):
                 self.frame_timer.start()
             return
         self._start_blocks([(track, bar)])
+
+    def _canvas_group(self, view) -> dict:
+        """The blocks selected one by one on ``view`` (a box, Shift or Ctrl
+        click), ``{track: bars}``, from the Selection Registry: the group a
+        drag moves. A track selected whole is not a group of its blocks."""
+        picks: dict = {}
+        for index, bar in self._picked_blocks():
+            if self._view_for(index) is view:
+                picks.setdefault(index, set()).add(bar)
+        return picks
 
     def _selected_blocks(self) -> list[tuple[int, int]]:
         """Every selected block, ``(track, bar)``, from the Selection
@@ -4871,7 +5024,6 @@ class MainWindow(QMainWindow):
                     if node_id:
                         ids.append(node_id)
         self.selection_registry.replace(ids)
-        self.playback_registry.reconcile_selection(self.selection_registry)
 
     def _project_selection(self) -> None:
         """Draw the Selection Registry on the canvases (picks and Qt's
@@ -4909,163 +5061,659 @@ class MainWindow(QMainWindow):
         finally:
             self._projecting = False
 
-    # -- selection playback ----------------------------------------------------
-    # The selection's shared ▶ plays the selected blocks through the one
-    # arrangement transport: the mixer is filtered to their stretches, each
-    # sounds where it sits on the timeline, on the transport's clock, and
-    # the transport loops over the selection. Pause pauses the transport,
-    # so nothing of the selection plays on. A block's own ▶ still auditions
-    # that block as a voice (see _start_blocks); the two never overlap.
+    # -- block playback on the one transport clock -----------------------------
+    # A block's ▶ starts that block, and Play (toolbar or Space) with blocks
+    # picked starts each of them. Every one is a member of its own in the
+    # Playback Registry, played by the transport from its own first frame,
+    # all at once, on the transport's one clock (see members_begin): none
+    # waits for its place on the arrangement or for another block, and each
+    # stops at its own end. A block started later joins at the clock's place
+    # now; the others go on where they are. A block's ▶ / ⏸ pauses or
+    # resumes that block only; Pause, Play and Stop act on all of them.
+    # A change of selection stops every playing block it does not hold (see
+    # _stop_deselected), one started with its own ▶ unselected too.
+    # A synced stem loop still plays as its own voice (see _start_blocks).
 
-    def _selection_play_active(self) -> bool:
-        """Whether the transport is playing (or holding) the selection."""
-        return self.engine.transport_filter is not None and bool(self._selection_play_ids)
+    def _members_active(self) -> bool:
+        """Whether the transport plays (or holds) blocks, not the song."""
+        return self.engine.members is not None
 
-    def _toggle_selection_play(self, blocks) -> None:
-        """▶ / ⏸ on the selection: start it, or pause or resume it."""
-        if self._selection_play_active():
-            if self.engine.playing:
-                self._pause()
-            else:
-                self._play(keep_focus=True)
-            return
-        ranges, start, end, ids = self._selection_ranges(blocks)
-        if not ranges:
-            return
-        self._selection_play_ids = set(ids)
-        self.engine.set_transport_filter(ranges)
-        self._engage_loop(start, end)
-        self._selection_play_loop = (start, end)
-        self.engine.seek(start)
-        self.playback_registry.start(ids)
-        self._update_selection_playhead()
-        self._play(keep_focus=True)  # stops block voices: the transport plays these now
-        count = len({track for track, _bar in blocks})
-        self.statusBar().showMessage(
-            f"Playing {count} selected track{'s' if count != 1 else ''} on the timeline, in time", 4000
-        )
-
-    def _update_selection_playhead(self) -> None:
-        """The playhead's look follows who owns playback: the full canvas
-        height for the arrangement transport, only the selected lanes while
-        the transport plays the selection (none on a canvas with no selected
-        lane), and hidden for block audition (see _sync_previews). The
-        position is the transport's in every case: no second clock."""
-        active = self._selection_play_active()
-        lanes = {}
-        if active:
-            for identity in self._selection_play_ids:
+    def _picked_blocks(self) -> list[tuple[int, int]]:
+        """Blocks picked themselves, ``(track, bar)``: not every block of a
+        track selected whole (a click on a clip, to edit it)."""
+        found = set()
+        for identity in self.selection_registry.ids:
+            if is_block_id(identity) or self._node_track(identity) is None:
                 block = self._identity_block(identity)
                 if block is not None:
-                    lanes.setdefault(self._view_for(block[0]), set()).add(block[0])
-        for view in self._timelines():
-            if not active:
-                view.set_playhead_bands(None)
-                continue
-            bands = [band for index in lanes.get(view, ()) if (band := view.lane_band(index)) is not None]
-            merged = []
-            for top, bottom in sorted(bands):
-                if merged and top <= merged[-1][1] + 0.5:
-                    merged[-1] = (merged[-1][0], max(merged[-1][1], bottom))  # one row, one band
-                else:
-                    merged.append((top, bottom))
-            view.set_playhead_bands(merged)
+                    found.add(block)
+        return sorted(found)
 
-    def _selection_ranges(self, blocks):
-        """``(filter, start, end, identities)`` for ``blocks``: per clip
-        index the arrangement frames of each block, the span they cover in
-        seconds, and each block's stable identity."""
-        ranges: dict[int, list] = {}
-        start = end = None
-        ids = []
+    def _play_members(self) -> bool:
+        """Play / Space: every member plays on, or every picked block
+        starts. False when neither applies (the song plays)."""
+        if self._members_active():
+            for key in list(self.playback_registry.playing_blocks):
+                self._hold_member(key, False)
+            self._run_clock()
+            return True
+        if self.engine.playing:
+            return False  # the song plays: it goes on
+        if len(self.selection_registry.ids) > 1:
+            self._start_member_entries(self._group_units())
+            return True
+        blocks = self._picked_blocks()
+        if not blocks:
+            return False  # nothing picked: the song plays
+        self._start_members(blocks)
+        return True
+
+    def _toggle_member(self, track: int, bar: int) -> bool:
+        """A block's own ▶ / ⏸: pause or resume this block only, or start it
+        as one more member. False while the song plays (it is in the song
+        already) or when it has no identity."""
+        identity = self._block_identity(track, bar)
+        if identity is None:
+            return False
+        identity = self._member_key(track, bar, identity) or identity
+        return self._toggle_unit(identity, lambda: self._start_members([(track, bar)]))
+
+    def _toggle_stem_loop(self, track: int) -> bool:
+        """▶ / ⏸ on a split stem in a synced loop (Repeat / Loop): its loop
+        is a member like any block, on the same clock and grid, in time with
+        everything else that plays, and it always loops. Keyed by the
+        stem's node, so a selection holding the stem plays the same member."""
+        identity = self.project.tracks[track].get("node_id") if 0 <= track < len(self.project.tracks) else None
+        place = self._unit_place(identity) if identity else None
+        if place is None:
+            return False
+        return self._toggle_unit(identity, lambda: self._start_member_entries({identity: place}))
+
+    def _toggle_unit(self, identity: str, start) -> bool:
+        """Pause or resume the member ``identity``, or ``start`` it as one
+        more (with the clock stopped, it plays alone: the others hold)."""
+        member = self.playback_registry.playing_blocks.get(identity)
+        if member is not None and identity in (self.engine.members or {}):
+            if member.state == PLAYBACK_PLAYING and self.engine.playing:
+                self._hold_member(identity, True)
+            else:
+                if not self.engine.playing:
+                    self._hold_others(identity)  # the clock restarts for this block alone
+                self._hold_member(identity, False)
+                self._run_clock()
+            self._sync_previews()
+            return True
+        if self.engine.playing and not self._members_active():
+            self.statusBar().showMessage("That block already plays with the song", 3000)
+            return True
+        if not self.engine.playing:
+            self._hold_others(identity)
+        start()
+        return True
+
+    def _loops_always(self, identity) -> bool:
+        """A split stem's synced loop loops whatever the loop button says."""
+        if is_block_id(identity):
+            return False
+        index = self._node_track(identity)
+        return index is not None and stem_loop(self.project.tracks[index]) is not None
+
+    def _hold_others(self, identity) -> None:
+        keep = {identity} if isinstance(identity, str) else set(identity)
+        for key, block in self.playback_registry.playing_blocks.items():
+            if key not in keep and block.state == PLAYBACK_PLAYING:
+                self._hold_member(key, True)
+
+    # The selection as one: two or more selected things (blocks picked by a
+    # box, Shift or Ctrl, or tracks selected whole, on either canvas) share
+    # one ▶ that starts, pauses and resumes them together, on the one clock.
+    # A track selected whole plays as one member over its whole clip, its
+    # bars one after another, as the single track it is. Each keeps its own
+    # audio, identity and place; nothing is merged.
+
+    def _group_units(self) -> dict:
+        """``{identity: (track, first frame, end frame)}`` of everything
+        selected, from the Selection Registry."""
+        units = {}
+        for identity in self.selection_registry.ids:
+            place = self._unit_place(identity)
+            if place is not None:
+                units[identity] = place
+        return units
+
+    def _unit_place(self, identity: str):
+        """``(track, first frame, end frame)`` of a selected or playing
+        thing now: a whole track by its node id, else a block. None when it
+        is gone."""
+        if not is_block_id(identity):
+            index = self._node_track(identity)
+            if index is not None:
+                track = self.project.tracks[index]
+                start = float(track.get("start", 0.0) or 0.0)
+                duration = float(track.get("duration", 0.0) or 0.0)
+                first, end = start, start + duration
+                loop = stem_loop(track)
+                if loop is not None:
+                    # A split stem in a synced loop plays that loop: its song
+                    # seconds on this clip, inside the clip.
+                    offset = float(track.get("offset", 0.0) or 0.0)
+                    first = max(first, start + loop[0] - offset)
+                    end = min(end, start + loop[1] - offset)
+                    if end <= first:
+                        return None
+                return index, int(round(first * OUTPUT_RATE)), int(round(end * OUTPUT_RATE))
+        block = self._identity_block(identity)
+        if block is None:
+            return self._place_by_source(identity)  # a run of several blocks
+        entries = self._block_entries([block])
+        return next(iter(entries.values()), None)
+
+    def _group_members(self) -> dict:
+        """The selection as the members that play it: each track's selected
+        stretches in order, keyed as the members already playing them."""
+        units = self._group_units()
+        return self._as_member_keys(self._chain_by_track(units)) if units else {}
+
+    def _as_member_keys(self, entries: dict) -> dict:
+        """The same entries, keyed by the member already playing each place
+        where there is one (an edit can give a block a new identity while
+        its member keeps the one it started with): never a second member."""
+        by_place = {(entry[0], entry[1], entry[2]): key for key, entry in (self.engine.members or {}).items()}
+        return {by_place.get(tuple(entry[:3]), identity): entry for identity, entry in entries.items()}
+
+    def _group_playing(self) -> bool:
+        """Whether everything selected plays now (the shared ▶ shows ⏸)."""
+        if not self.engine.playing or not self._members_active():
+            return False
+        members = self.playback_registry.playing_blocks
+        keys = self._group_members()
+        return bool(keys) and all(
+            members.get(key) is not None and members[key].state == PLAYBACK_PLAYING for key in keys
+        )
+
+    def _toggle_group(self) -> None:
+        """The shared ▶ / ⏸: pause every selected thing, or play them all
+        together (those not playing yet from their own start, the paused
+        ones on from where they are). Other playing blocks are left alone,
+        except that a stopped clock restarts for the selection only."""
+        units = self._group_members()
+        if not units:
+            return
+        if self._group_playing():
+            for identity in units:
+                self._hold_member(identity, True)
+            self._sync_previews()
+            return
+        if not self.engine.playing and self._members_active():
+            self._hold_others(units)
+        if self.engine.playing and not self._members_active():
+            self.statusBar().showMessage("Those tracks already play with the song", 3000)
+            return
+        self._start_member_entries(units)
+        count = len(units)
+        self.statusBar().showMessage(f"Playing {count} selected together", 3000)
+
+    def _hold_member(self, key: str, held: bool) -> None:
+        self.engine.member_hold(key, held)
+        self.playback_registry.set_state(key, PLAYBACK_PAUSED if held else PLAYBACK_PLAYING)
+
+    def _run_clock(self) -> None:
+        if not self.engine.playing:
+            self._play(keep_focus=True)
+        self.frame_timer.start()
+        self._sync_transport_lamp()
+
+    def _start_members(self, blocks) -> None:
+        """Each block becomes a member, from its own first frame now (see
+        _start_member_entries)."""
+        entries = {}
+        for identity, entry in self._block_entries(blocks).items():
+            block = self._identity_block(identity)
+            known_key = self._member_key(*block, identity) if block is not None else None
+            entries[known_key or identity] = entry  # one member per block, never a second
+        self._start_member_entries(entries)
+
+    def _start_member_entries(self, entries: dict, play: bool = True) -> None:
+        """``{identity: (track, first frame, end frame)}`` become members, in
+        one step for the audio thread: each track's stretches play in order,
+        as that one track (see _chain_by_track), every track from now.
+        Members already playing are not touched (a paused one plays on from
+        its place); a block auditioning carries on from where it is."""
+        if not entries:
+            return
+        if all(len(entry) == 3 for entry in entries.values()):
+            entries = self._chain_by_track(entries)
+        entries = self._as_member_keys(entries)
+        self._hear_every_member()
+        adopted, into, voices = self._adopt_auditions()
+        entries = {**adopted, **entries}
+        loop = self._block_loop
+        known = self.engine.members or {}
+        replaced = self._overlapped_members(entries, known)
+        try:
+            with self.engine.batch():
+                self.engine.members_begin()
+                for key in voices:
+                    self.engine.preview_stop(key)
+                    self._preview_tracks.pop(key, None)
+                for key in replaced:
+                    self.engine.member_remove(key)  # its track plays again as the new sequence
+                for identity, (track, first, end, *rest) in entries.items():
+                    wait, period, rate = (list(rest) + [0, None, 1.0][len(rest):])[:3]
+                    if identity in known:
+                        self.engine.member_hold(identity, False)
+                    else:
+                        loop = self._block_loop or self._loops_always(identity)
+                        # In time with what already plays (an audition taken
+                        # over carries on exactly where it is instead).
+                        self.engine.member_add(
+                            identity, track, first, end, loop, into.get(identity, -wait), period,
+                            sync=identity not in into, rate=rate,
+                        )
+                if play:
+                    self.engine.play()
+        except Exception as exc:
+            QMessageBox.critical(self, "Audio output error", f"Could not start audio output.\n\n{exc}")
+        for key in replaced:
+            self.playback_registry.remove(key)
+        members = self.engine.members or {}
+        for identity, (track, first, end, *_rest) in entries.items():
+            entry = members.get(identity)
+            if entry is None:
+                continue
+            existing = self.playback_registry.playing_blocks.get(identity)
+            if existing is not None:
+                existing.state = PLAYBACK_PLAYING
+                continue
+            data = self.project.tracks[track]
+            shift = self._file_shift(data)
+            node = self.track_registry.get(data.get("node_id"))
+            self.playback_registry.add(PlayingBlockState(
+                id=identity,
+                source_id=node.source_asset_id if node is not None else None,
+                source_start=first + shift,
+                source_end=end + shift,
+                source_cursor=first + shift,
+                global_start=entry[3],
+                loop=entry[4],
+                rate=entry[7],
+            ))
+        self._update_member_blocks()
+        self._set_loop_button(self._block_loop)  # the button shows the blocks' looping now
+        if play:
+            self._run_clock()
+        self._sync_previews()
+
+    # Most a row is sped up or slowed down to fit the lead's bars (8 %);
+    # past that it keeps its speed and rests until its next bar instead.
+    MAX_FIT = 0.08
+
+    def _chain_by_track(self, entries: dict) -> dict:
+        """The selection as players that never wait for each other: every
+        row starts at once and loops on its own, its selected stretches one
+        after another (gaps left out; stretches of one clip side by side are
+        one run). The drums lead: each row is fitted to a whole number of
+        the drums' bars, a little faster when it runs long, a little slower
+        when it runs short, so its downbeats land on the drums' downbeats on
+        every pass. ``{key: (track, first, end, frames to wait, loop period
+        or None, rate)}``; a run of several blocks of a clip is keyed by the
+        logical block that spans it."""
+        tracks = self.project.tracks
+        rows_of: dict = {}
+        by_row: dict[tuple, list] = {}
+        for identity, (track, first, end) in entries.items():
+            view = self._view_for(track)
+            if view not in rows_of:
+                rows_of[view] = view.lane_rows(tracks)[0]
+            rows = rows_of[view]
+            row = rows[track] if 0 <= track < len(rows) and rows[track] >= 0 else ("track", track)
+            by_row.setdefault((view.canvas, row), []).append((first, end, track, identity))
+        groups: list[list] = []
+        for items in by_row.values():
+            items.sort()
+            runs: list[list] = []
+            for first, end, track, identity in items:
+                last = runs[-1] if runs else None
+                if last is not None and last[3] == track and first <= last[1] + 2:
+                    last[1] = max(last[1], end)
+                    last[2].append(identity)
+                else:
+                    runs.append([first, end, [identity], track])
+            groups.append(runs)
+        lone = len(groups) == 1 and len(groups[0]) == 1
+        bar = None if lone else self._lead_bar_frames(groups)
+        drum = self._drum_index()
+        chained = {}
+        for runs in groups:
+            natural = sum(end - first for first, end, _ids, _track in runs)
+            rate, cycle = 1.0, natural
+            leads = drum is not None and any(track == drum for *_rest, track in runs)
+            if bar and not leads:
+                bars = max(1, int(round(natural / bar)))
+                fitted = natural / (bars * bar)
+                if abs(fitted - 1.0) <= self.MAX_FIT:
+                    rate, cycle = fitted, int(round(bars * bar))
+                else:
+                    cycle = int(math.ceil(natural / bar) * bar)  # its own speed, resting to the next bar
+            period = None if (len(runs) == 1 and cycle == natural and rate == 1.0) else cycle
+            wait = 0.0
+            for first, end, ids, track in runs:
+                data = tracks[track]
+                node = data.get("node_id")
+                shift = self._file_shift(data)
+                key = ids[0] if len(ids) == 1 or not node else block_id(node, first + shift, end + shift)
+                chained[key] = (track, first, end, int(round(wait)), period, rate)
+                wait += (end - first) / rate
+        return chained
+
+    def _lead_bar_frames(self, groups) -> float | None:
+        """One bar of the lead, in frames: the drums' own selected row when
+        it is in the selection (its length over its whole bars, so the drums
+        play as recorded), else the drums' downbeat spacing, else the
+        song's bar lines, else the tempo and meter."""
+        grid = None
+        drum = self._drum_index()
+        if drum is not None:
+            lines = self._downbeat_grid(self.project.tracks[drum]) or []
+            steps = [b - a for a, b in zip(lines, lines[1:]) if b > a]
+            if steps:
+                grid = float(np.median(steps)) * OUTPUT_RATE
+        if grid is None:
+            lines = self._bar_lines()
+            steps = [b - a for a, b in zip(lines, lines[1:]) if b > a]
+            if steps:
+                grid = float(np.median(steps)) * OUTPUT_RATE
+        if grid is None:
+            numerator, _denominator = parse_time_signature(self.signature.currentText())
+            grid = 60.0 / max(1.0, float(self.bpm.value())) * numerator * OUTPUT_RATE
+        if drum is not None:
+            for runs in groups:
+                if any(track == drum for *_rest, track in runs):
+                    natural = sum(end - first for first, end, _ids, _track in runs)
+                    return natural / max(1, int(round(natural / grid)))
+        return grid
+
+    def _overlapped_members(self, entries: dict, known: dict) -> list:
+        """Members a new run takes over: on the same track, over the same
+        audio, under another key (a run grew by a block, say). Without this
+        that audio would play twice."""
+        gone = []
+        for identity, (track, first, end, *_rest) in entries.items():
+            if identity in known:
+                continue
+            for key, entry in known.items():
+                if key not in entries and key not in gone and entry[0] == track and entry[1] < end and first < entry[2]:
+                    gone.append(key)
+        return gone
+
+    @staticmethod
+    def _file_shift(track) -> int:
+        """Arrangement frame to the track's file frame: add this."""
+        return int(round((float(track.get("offset", 0.0) or 0.0) - float(track.get("start", 0.0) or 0.0)) * OUTPUT_RATE))
+
+    def _block_entries(self, blocks) -> dict:
+        """``{identity: (clip index, first frame, end frame)}`` for
+        ``blocks``: each block's stretch in arrangement frames on its clip
+        (so its file frames, gain, pan and fades are the clip's own)."""
+        entries = {}
         for track, bar in blocks:
             times = self._view_for(track).block_times(track, bar)
             identity = self._block_identity(track, bar)
             if times is None or identity is None:
                 continue
-            first, last = float(times[0]), float(times[1])
-            ranges.setdefault(track, []).append((int(round(first * OUTPUT_RATE)), int(round(last * OUTPUT_RATE))))
-            start = first if start is None else min(start, first)
-            end = last if end is None else max(end, last)
-            ids.append(identity)
-        return ranges, start, end, ids
+            entries[identity] = (track, int(round(float(times[0]) * OUTPUT_RATE)), int(round(float(times[1]) * OUTPUT_RATE)))
+        return entries
 
-    def _stop_selection_play(self) -> None:
-        """The selection stops playing: the transport is unfiltered again
-        and its loop goes. The selection stays."""
-        if self.engine.transport_filter is None and not self.playback_registry.states:
+    def _adopt_auditions(self):
+        """Blocks auditioning now, as members that carry on from where they
+        are: ``(entries, frames already in, voice keys)``, measured at what
+        is mixed next, not what is heard. A synced stem loop and a paused
+        voice are not taken over."""
+        entries, into, voices = {}, {}, []
+        if not self._preview_tracks:
+            return entries, into, voices  # nothing auditioning: nothing to take over
+        states = self.engine.previews(time.monotonic() + self.engine.output_delay)
+        for key, (data, run) in list(self._preview_tracks.items()):
+            state = states.get(key)
+            if state is None or not state[0] or not run or key[1] > STEM_BLOCK:
+                continue
+            track = key[0]
+            if not (0 <= track < len(self.project.tracks)) or self.project.tracks[track] is not data:
+                continue
+            view = self._view_for(track)
+            for bar in range(run[0], run[1] + 1):
+                times = view.block_times(track, bar)
+                identity = self._block_identity(track, bar)
+                if times is None or identity is None:
+                    continue
+                entries[identity] = (track, int(round(times[0] * OUTPUT_RATE)), int(round(times[1] * OUTPUT_RATE)))
+                # A later bar of a run comes in when the run reaches it.
+                into[identity] = int(round((float(state[1]) - float(times[0])) * OUTPUT_RATE))
+            voices.append(key)
+        return entries, into, voices
+
+    def _hear_every_member(self) -> None:
+        """Members can be on either canvas and any track: a canvas or track
+        focus (which silences the rest) does not apply to them."""
+        self._clear_track_focus()
+        if self._canvas_focus is not None:
+            self._set_canvas_focus(None)
+
+    def _remove_member(self, identity: str) -> None:
+        """One block stops; the others play on, untouched."""
+        self.engine.member_remove(identity)
+        self.playback_registry.remove(identity)
+        if not self.engine.members:
+            self._end_members(pause=True)
+        self._sync_previews()
+
+    def _retire_completed_members(self) -> None:
+        """Blocks that played to their own end leave; the rest go on."""
+        done = self.engine.members_completed
+        if not done:
             return
-        self.engine.set_transport_filter(None)
+        for key in done:
+            self.engine.member_remove(key)
+            self.playback_registry.remove(key)
+        if not self.engine.members:
+            self._end_members(pause=True)
+
+    def _end_members(self, pause: bool = False) -> None:
+        """Member playback ends (Stop, or nothing left): the transport is
+        back where it began, playing the song. The selection stays."""
+        if not self._members_active() and not self.playback_registry.playing_blocks:
+            return
+        if pause and self.engine.playing:
+            self._pause()
+        origin = self.engine.members_end()
+        if origin is not None:
+            self.engine.seek(origin / OUTPUT_RATE)
         self.playback_registry.stop()
-        self._selection_play_ids = set()
-        self._update_selection_playhead()
-        if self._selection_play_loop is not None and self._loop_bounds == self._selection_play_loop:
-            self._clear_loop()
-        self._selection_play_loop = None
+        self._member_blocks = {}
+        self._set_loop_button(self.engine.loop is not None)  # the arrangement's loop again
+        self._sync_previews()
+        self._sync_transport_lamp()
+
+    def _sync_member_loop(self) -> None:
+        """Every playing block wraps within its own stretch, or plays once,
+        as ``_block_loop`` says."""
+        if not self._members_active():
+            return
+        loop = self._block_loop
+        keys = [key for key in (self.engine.members or {}) if not self._loops_always(key)]
+        self.engine.member_set_loop(loop, keys)
+        for key in keys:
+            block = self.playback_registry.playing_blocks.get(key)
+            if block is not None:
+                block.loop = loop
+
+    def _update_member_blocks(self) -> None:
+        """Where each member is now, ``identity -> (track, bar)`` (rows,
+        indices and bars may have changed)."""
+        blocks = {}
+        for identity in self.playback_registry.playing_blocks:
+            whole = None if is_block_id(identity) else self._node_track(identity)
+            if whole is not None:
+                blocks[identity] = (whole, None)  # a whole track: the bar its cursor is in, each frame
+                continue
+            block = self._identity_block(identity)
+            if block is None:
+                place = self._place_by_source(identity)  # a run: the bar its cursor is in, each frame
+                block = None if place is None else (place[0], None)
+            if block is not None:
+                blocks[identity] = block
+        self._member_blocks = blocks
+
+    def _place_members_on_tracks(self) -> None:
+        """Each playing block onto the track that holds its source frames
+        now (tracks were reordered, cut or moved), from the tracks alone,
+        before any canvas redraws. Its place in its own stretch is kept."""
+        for identity in list(self.engine.members or {}):
+            whole = not is_block_id(identity) and self._node_track(identity) is not None
+            place = self._unit_place(identity) if whole else self._place_by_source(identity)
+            if place is not None:
+                self.engine.member_place(identity, *place)
+
+    def _place_by_source(self, identity: str):
+        """``(track, first, end)`` arrangement frames of the stretch an
+        identity names, found by its source frames on the tracks of its
+        node's family: a block, a run of blocks, or a segment. None when no
+        track holds it now."""
+        registry = self.track_registry
+        if is_block_id(identity):
+            owner, (first, last) = block_node(identity), block_frames(identity)
+        else:
+            node = registry.get(identity)
+            if node is None:
+                return None
+            owner, first, last = node.id, node.source_start_frame, node.source_end_frame
+            while owner is not None and self._node_track(owner) is None:
+                parent = registry.get(owner)
+                owner = parent.parent_id if parent is not None else None
+            if owner is None:
+                return None
+        family = {owner} | {child.id for child in registry.descendants(owner)}
+        for index, track in enumerate(self.project.tracks):
+            if track.get("node_id") not in family:
+                continue
+            shift = self._file_shift(track)
+            offset = int(round(float(track.get("offset", 0.0) or 0.0) * OUTPUT_RATE))
+            length = int(round(float(track.get("duration", 0.0) or 0.0) * OUTPUT_RATE))
+            if offset - 2 <= first and last <= offset + length + 2:
+                return index, first - shift, last - shift
+        return None
+
+    def _member_key(self, track: int, bar: int, identity: str | None) -> str | None:
+        """The member playing this block, if any: by its identity, or the
+        member shown on it (a move can give a block a new identity while
+        its member keeps the one it started with)."""
+        if identity in self.playback_registry.playing_blocks:
+            return identity
+        for key, block in self._member_blocks.items():
+            if block == (track, bar) and key in self.playback_registry.playing_blocks:
+                return key
+        times = self._view_for(track).block_times(track, bar) if 0 <= track < len(self.project.tracks) else None
+        if times is not None:
+            # A block inside a run (or a whole track) playing as one member.
+            middle = int(round((float(times[0]) + float(times[1])) / 2 * OUTPUT_RATE))
+            for key, entry in (self.engine.members or {}).items():
+                if entry[0] == track and entry[1] <= middle < entry[2] and key in self.playback_registry.playing_blocks:
+                    return key
+        return None
+
+    def _refresh_members(self) -> None:
+        """Tracks were reloaded: each member follows its block (by identity)
+        and keeps its place; a block that is gone stops."""
+        if not self._members_active():
+            return
+        for identity in list(self.playback_registry.playing_blocks):
+            entry = self._unit_place(identity)
+            if entry is None:
+                self.engine.member_remove(identity)
+                self.playback_registry.remove(identity)
+                continue
+            self.engine.member_place(identity, *entry)
+        if not self.engine.members:
+            self._end_members(pause=True)
+            return
+        self._update_member_blocks()
+
+    def _stop_deselected(self) -> None:
+        """The selection changed: every playing block it does not hold stops
+        and leaves the Playback Registry, like any unselected block (one
+        started with its own ▶ without being selected too). A playing run
+        that lost only some of its blocks plays on as the ones still
+        selected, in time. Blocks still selected play on."""
+        before, self._selection_before = self._selection_before, None
+        members = self.engine.members
+        if before is None or not members:
+            return
+        ids = list(self.selection_registry.ids)
+        if set(ids) == before:
+            return
+        kept = {identity: place for identity in ids if (place := self._unit_place(identity)) is not None}
+
+        def overlap(place, clip, first, end) -> int:
+            return max(0, min(end, place[2]) - max(first, place[1])) if place[0] == clip else 0
+
+        stop, rejoin = [], {}
+        for key, entry in members.items():
+            clip, first, end = entry[0], entry[1], entry[2]
+            covered = sum(overlap(place, clip, first, end) for place in kept.values())
+            if key in kept or covered >= (end - first) - 2:
+                continue  # still selected all over (it moved, or was picked again)
+            stop.append(key)
+            rejoin.update({identity: place for identity, place in kept.items() if overlap(place, clip, first, end)})
+        if rejoin:
+            # The run's selected rest replaces it, on the grid (the old run
+            # is taken out as it starts, so its audio never doubles).
+            self._start_member_entries(rejoin, play=self.engine.playing)
+        for key in stop:
+            if key in (self.engine.members or {}):
+                self._remove_member(key)
+        self._sync_previews()
+
+    def _member_marks(self) -> dict:
+        """``(track, bar) -> (playing, arrangement seconds)`` for each member
+        with a place to show: its own start sample on the one clock, never
+        its place on the arrangement, decides how far in it is."""
+        members = self.engine.members
+        if not members:
+            return {}
+        playing = self.engine.playing
+        now = self.engine.heard_position() if playing else self.engine.position
+        position = int(round(now * OUTPUT_RATE))
+        marks = {}
+        for key, entry in members.items():
+            block = self._member_blocks.get(key)
+            offset = AudioEngine.member_offset(entry, position)
+            if block is None or offset is None:
+                continue
+            seconds = (entry[1] + offset) / OUTPUT_RATE
+            if block[1] is None:
+                bar = self._view_for(block[0]).block_at_time(block[0], seconds)
+                if bar is None:
+                    continue
+                block = (block[0], bar)
+            marks[block] = (playing and entry[5] is None, seconds)
+            record = self.playback_registry.playing_blocks.get(key)
+            if record is not None:
+                record.source_cursor = record.source_start + offset
+        return marks
 
     def _follow_selection(self) -> None:
         """A selection edit on a canvas, by any means: into the Selection
-        Registry, then, while the selection plays, into the mixer filter once
-        the current operation is done (one that clears the selection and
-        picks it again leaves it as it was, and restarts nothing)."""
+        Registry. What left the selection stops playing once the edit is
+        done (an edit that clears the selection and picks again counts as
+        one), see _stop_deselected."""
         if self._projecting:
             return
+        if self._selection_before is None:
+            self._selection_before = set(self.selection_registry.ids)
+            QTimer.singleShot(0, self._stop_deselected)
         self._selection_from_views()
-        if self._selection_play_active() and not self._selection_edit_pending:
-            self._selection_edit_pending = True
-            QTimer.singleShot(0, self._apply_selection_edit)
-
-    def _apply_selection_edit(self) -> None:
-        """The Selection Registry changed while it plays through the
-        transport. A block that left it leaves the filter at once (silent
-        from the next audio block) and the Playback Registry; the rest play
-        on, on the same clock. A block picked into it joins at the
-        transport's place; a track selected whole (a click on its name, to
-        edit it) does not start playing by that alone. With nothing left the
-        selection stops."""
-        self._selection_edit_pending = False
-        if self._following_selection or not self._selection_play_active():
-            return
-        self._following_selection = True
-        try:
-            blocks = []
-            for index, bar in self._selected_blocks():  # parents resolved to their blocks
-                identity = self._block_identity(index, bar)
-                if identity is None:
-                    continue
-                picked = identity in self.selection_registry  # picked itself, not via its whole track
-                if identity in self._selection_play_ids or picked:
-                    blocks.append((index, bar))
-            if not blocks:
-                self._stop_selection_play()
-                if self.engine.playing:
-                    self._pause()
-                self._sync_transport_lamp()
-                return
-            ranges, _start, _end, ids = self._selection_ranges(blocks)
-            self._selection_play_ids = set(ids)
-            self.engine.set_transport_filter(ranges)
-            state = "playing" if self.engine.playing else "paused"
-            self.playback_registry.states = {identity: state for identity in ids}
-            self._update_selection_playhead()
-        finally:
-            self._following_selection = False
-
-    def _refresh_selection_filter(self) -> None:
-        """Tracks were reloaded (indices or blocks may have changed): the
-        filter follows the playing identities."""
-        if self.engine.transport_filter is None or not self._selection_play_ids:
-            return
-        blocks = [block for identity in self._selection_play_ids if (block := self._identity_block(identity)) is not None]
-        ranges, _start, _end, ids = self._selection_ranges(blocks)
-        if not ranges:
-            self._stop_selection_play()
-            return
-        self._selection_play_ids = set(ids)
-        self.engine.set_transport_filter(ranges)
-        state = "playing" if self.engine.playing else "paused"
-        self.playback_registry.states = {identity: state for identity in ids}
-        self._update_selection_playhead()  # rows may have moved
+        for view in self._timelines():
+            view._update_combined_play()
 
     # -- the Track Registry --------------------------------------------------
 
@@ -5632,6 +6280,13 @@ class MainWindow(QMainWindow):
             if stem_group(track) == group and stem_loop(track) is not None:
                 track["stem_loop"] = [round(start, 6), round(end, 6)]
         self.engine.group_set_loop(loop_group(group), (start, end))
+        members = self.engine.members or {}
+        for track in tracks:
+            key = track.get("node_id")
+            if stem_group(track) == group and key in members:
+                place = self._unit_place(key)
+                if place is not None:
+                    self.engine.member_place(key, *place)  # a playing loop takes the new region at once
         self._show_stem_loops()
         if finished:
             self._commit_edit()
@@ -5653,6 +6308,10 @@ class MainWindow(QMainWindow):
 
     def _stop_block_at(self, track: int, bar: int) -> None:
         """Stop the voice playing this block, whichever kind it is."""
+        identity = self._member_key(track, bar, self._block_identity(track, bar))
+        if identity is not None:
+            self._remove_member(identity)  # the rest play on
+            return
         key = self._block_voice(track, bar, self.engine.previews())
         self._stop_block(key, self.engine.voice_state(key)[1] or None)
 
@@ -5674,7 +6333,10 @@ class MainWindow(QMainWindow):
             for track, bars in sorted(view.picks().items())
             for bar in sorted(bars)
         ]
-        self._start_blocks(keys)
+        if self.engine.playing and not self._members_active():
+            self.statusBar().showMessage("Those blocks already play with the song", 3000)
+            return
+        self._start_members(keys)
 
     def _sync_previews(self, states: dict | None = None) -> dict:
         """Buttons, tints and cursors from the engine's own voice state."""
@@ -5698,6 +6360,8 @@ class MainWindow(QMainWindow):
                     blocks[(track, covered)] = state
                 continue
             blocks[(track, bar)] = state
+        # Playing blocks show the same way: tint, ▶ / ⏸, their own cursor.
+        blocks.update(self._member_marks())
         for timeline in self._timelines():
             timeline.set_previews(blocks)
             timeline.set_playhead_visible(shown)

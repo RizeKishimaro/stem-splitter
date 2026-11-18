@@ -1,4 +1,5 @@
 import os
+import math
 import threading
 import time
 import numpy as np
@@ -212,6 +213,47 @@ def mix_clip_into(out, clip, start) -> float:
     return float(max(np.max(np.abs(piece_l)), np.max(np.abs(piece_r))))
 
 
+def mix_clip_rate_into(out, clip, start: float, rate: float, end: int) -> float:
+    """Like ``mix_clip_into``, read ``rate`` times as fast: ``len(out)``
+    output frames from arrangement frame ``start`` (fractional), never past
+    arrangement frame ``end``, by linear interpolation. Gain, pan and fades
+    as the clip's own. Returns the peak it added."""
+    frames = len(out)
+    audio = clip["audio"]
+    offset = int(clip.get("offset", 0))
+    length = int(clip.get("length", max(0, len(audio) - offset)))
+    gain = float(clip["gain"]) * float(clip.get("clip_gain", 1.0))
+    pan = clip["pan"]
+    left_gain = gain * (1.0 - max(0.0, pan))
+    right_gain = gain * (1.0 + min(0.0, pan))
+    # Positions in the file, one per output frame.
+    pos = (float(start) - clip["start"] + offset) + float(rate) * np.arange(frames, dtype=np.float64)
+    limit = min(len(audio) - 1, offset + max(0, length) - 1, int(end) - clip["start"] + offset - 1)
+    inside = (pos >= offset) & (pos <= limit)
+    if not inside.any():
+        return 0.0
+    pos = np.clip(pos, 0, max(0, len(audio) - 2))
+    low = pos.astype(np.int64)
+    frac = (pos - low).astype(np.float32)
+    high = np.minimum(low + 1, len(audio) - 1)
+    left = audio[low, 0] * (1.0 - frac) + audio[high, 0] * frac
+    right = audio[low, 1] * (1.0 - frac) + audio[high, 1] * frac
+    env = inside.astype(np.float32)
+    fade_in = int(clip.get("fade_in", 0))
+    fade_out = int(clip.get("fade_out", 0))
+    if fade_in > 0 or fade_out > 0:
+        rel = (pos - offset).astype(np.float32)
+        if fade_in > 0:
+            env *= np.clip(rel / float(fade_in), 0.0, 1.0)
+        if fade_out > 0:
+            env *= np.clip((length - rel) / float(fade_out), 0.0, 1.0)
+    left = left * env * left_gain
+    right = right * env * right_gain
+    out[:, 0] += left
+    out[:, 1] += right
+    return float(max(np.max(np.abs(left)), np.max(np.abs(right))))
+
+
 def render_clips(clips, start, frames, output_gain=1.0, master_muted=False, include=None):
     """Mix ``frames`` samples from arrangement frame ``start``, offline.
 
@@ -292,11 +334,21 @@ class AudioEngine:
         # The transport plays only these stretches when set (see
         # set_transport_filter); built off the audio thread, read by it.
         self._transport_filter = None
+        # Member playback (see members_begin): the transport frame it began
+        # at, the members by key, swapped in whole on every change, the same
+        # for the UI, and the members that played to their end.
+        self._member_origin = None
+        self._members: dict = {}
+        self._member_view = None
+        self._members_done = frozenset()
         self._timing = np.zeros(4096, dtype=np.float64)
         self._timed = 0
         self._late = 0
         self._underruns = 0
         self._limit_gain = 1.0
+        # Seconds from writing a block to hearing it, as the last callback
+        # measured it (see _sounds_at); read by output_delay.
+        self._output_delay = 0.0
 
     @property
     def position(self):
@@ -501,6 +553,252 @@ class AudioEngine:
     def transport_filter(self):
         return self._transport_filter
 
+    # -- block members on the one transport clock --------------------------
+    #
+    # The transport's position is the one clock. While member playback is
+    # on, the transport plays its members instead of the arrangement: each
+    # member is a stretch of a clip with the transport sample it started at.
+    # Its place is ``position - start`` frames into its own stretch (rate 1:
+    # every file is resampled to OUTPUT_RATE on load), whatever the place of
+    # the stretch on the arrangement and whatever the other members do. A
+    # member joins at the clock's place now and plays from its own first
+    # frame. Members are added, moved and removed one at a time; the audio
+    # thread sees the whole new set or the old one, never half of it.
+
+    def members_begin(self) -> None:
+        """Member playback on, with no members yet: the transport stops
+        playing the arrangement. Its position is where it was."""
+        with self._lock:
+            if self._member_origin is None:
+                self._member_origin = self._position
+                self._members = {}
+                self._publish_members()
+
+    def members_end(self) -> int | None:
+        """Member playback off: every member goes and the transport plays
+        the arrangement again. Returns the frame member playback began at."""
+        with self._lock:
+            origin = self._member_origin
+            self._member_origin = None
+            self._members = {}
+            self._members_done = frozenset()
+            self._member_view = None
+            return origin
+
+    # A member entry: [clip, first, end, start, loop, held, period, rate].
+    # ``rate`` is source frames per output frame (1.0: as recorded; a little
+    # above plays it a little faster). ``start``, ``held`` and ``period`` are
+    # in output frames (the transport's), ``first`` and ``end`` in the clip's
+    # arrangement frames, its own audio.
+
+    @staticmethod
+    def _sounding(entry) -> int:
+        """Output frames one pass of a member lasts at its rate."""
+        length = entry[2] - entry[1]
+        rate = entry[7]
+        return length if rate == 1.0 else int(math.ceil(length / rate))
+
+    def member_add(
+        self,
+        key,
+        clip: int,
+        first: int,
+        end: int,
+        loop: bool = False,
+        into: int = 0,
+        period: int | None = None,
+        sync: bool = False,
+        rate: float = 1.0,
+    ) -> None:
+        """One more member, from now: ``first``..``end`` arrangement frames of
+        clip ``clip``, from its first frame (or ``into`` frames in, for a
+        block that carries on from another player; a negative ``into`` waits
+        that long first, for a stretch that follows others of its track).
+        ``period``: output frames from one start of it to the next when it
+        loops (a sequence of stretches loops as a whole), else its own
+        length at ``rate``. ``rate``: source frames per output frame, to fit
+        a stretch to the lead's bars (a little faster or slower).
+        Other members are not touched. A key already playing is left as it
+        is.
+
+        ``sync``: it keeps time with the members already playing. Its cycle
+        (``period``, else its length) is laid on the grid that began with
+        member playback, so it starts where it would be had it started with
+        the first ones: looping, at that place in its cycle now; not
+        looping, at the start of its next cycle. ``into`` (zero or a wait)
+        then counts from that start."""
+        with self._lock:
+            if self._member_origin is None or key in self._members or int(end) <= int(first):
+                return
+            members = dict(self._members)
+            rate = float(rate) if rate and float(rate) > 0 else 1.0
+            entry = [int(clip), int(first), int(end), 0, bool(loop), None, None, rate]
+            sounding = self._sounding(entry)
+            entry[6] = None if period is None or int(period) <= sounding else int(period)
+            start = self._position - int(into)
+            if sync and int(into) <= 0:
+                cycle = entry[6] or sounding
+                phase = (self._position - self._member_origin) % cycle
+                base = self._position - phase
+                if not loop and phase > 0:
+                    base += cycle  # the next cycle on the grid, from its start
+                start = base - int(into)
+            entry[3] = start
+            members[key] = entry
+            self._members = members
+            self._publish_members()
+
+    def member_place(self, key, clip: int, first: int, end: int) -> None:
+        """A member's clip or stretch moved (tracks reloaded): its place in
+        its own stretch is kept."""
+        with self._lock:
+            entry = self._members.get(key)
+            if entry is None or int(end) <= int(first):
+                return
+            members = dict(self._members)
+            members[key] = [int(clip), int(first), int(end)] + entry[3:]
+            self._members = members
+            self._publish_members()
+
+    def member_remove(self, key) -> None:
+        with self._lock:
+            if key in self._members:
+                members = dict(self._members)
+                del members[key]
+                self._members = members
+                self._members_done = self._members_done - {key}
+                self._publish_members()
+
+    def member_hold(self, key, held: bool, sync: bool = True) -> None:
+        """Pause one member where it is, or let it play again; the clock and
+        the other members go on. ``sync``: it comes back in time with them,
+        where it would be had it never paused (its start sample stays, so
+        it lands on the beat the others are on); a member that does not
+        loop and would be past its end waits for its next cycle instead.
+        Without ``sync`` it plays on from where it paused."""
+        with self._lock:
+            entry = self._members.get(key)
+            if entry is None or (entry[5] is not None) == bool(held):
+                return
+            members = dict(self._members)
+            entry = list(entry)
+            if held:
+                entry[5] = self._position - entry[3]
+            elif not sync:
+                entry[3], entry[5] = self._position - entry[5], None
+            else:
+                sounding = self._sounding(entry)
+                cycle = entry[6] or sounding
+                local = self._position - entry[3]
+                if local > 0:
+                    laps = local // cycle
+                    entry[3] += laps * cycle
+                    if not entry[4] and local - laps * cycle >= sounding:
+                        entry[3] += cycle  # past its turn in this cycle: the next one
+                entry[5] = None
+            members[key] = entry
+            self._members = members
+            self._publish_members()
+
+    def member_set_loop(self, loop: bool, keys=None) -> None:
+        """Members wrap within their own stretch (or stop at its end). Each
+        keeps its place: one that has wrapped is counted from the start of
+        the pass it is in, so with looping off it finishes that pass."""
+        with self._lock:
+            members = dict(self._members)
+            for key, entry in members.items():
+                if keys is None or key in keys:
+                    entry = list(entry)
+                    cycle = entry[6] or self._sounding(entry)
+                    if entry[5] is not None:
+                        entry[5] %= cycle
+                    elif self._position - entry[3] >= cycle:
+                        entry[3] = self._position - (self._position - entry[3]) % cycle
+                    entry[4] = bool(loop)
+                    members[key] = entry
+            self._members = members
+            self._members_done = frozenset()
+            self._publish_members()
+
+    def _publish_members(self) -> None:
+        self._member_view = {key: tuple(entry) for key, entry in self._members.items()}
+
+    @property
+    def output_delay(self) -> float:
+        """Seconds from mixing a block to hearing it: what the last audio
+        callback measured (PortAudio's DAC time, else the stream's reported
+        latency), or the open stream's latency before any callback, 0 with
+        no stream (nothing is heard, so nothing is late). Lock-free."""
+        if self._output_delay > 0.0:
+            return self._output_delay
+        latency = getattr(self._stream, "latency", 0.0)
+        return float(latency) if isinstance(latency, (int, float)) else 0.0
+
+    @property
+    def member_origin(self) -> int | None:
+        """The transport frame member playback began at: the start of the
+        grid every member keeps time on. Lock-free."""
+        return self._member_origin
+
+    @property
+    def members(self):
+        """``{key: (clip, first, end, start sample, loop, held frames or
+        None, loop period or None, rate)}`` while member playback is on,
+        else None. Lock-free."""
+        return self._member_view
+
+    @property
+    def members_completed(self) -> frozenset:
+        """Members that played to their own end (not looping). Lock-free."""
+        return self._members_done
+
+    @staticmethod
+    def member_offset(entry, position: int):
+        """Source frames into its stretch member ``entry`` is at transport
+        frame ``position``, or None while it is silent (ended, or waiting
+        for its turn)."""
+        _clip, first, end, start, loop, held, period, rate = entry
+        sounding = AudioEngine._sounding(entry)
+        local = held if held is not None else position - start
+        if loop:
+            local %= period or sounding
+        if not 0 <= local < sounding:
+            return None
+        return min(end - first - 1, int(local * rate))
+
+    def _mix_members(self, target, clip, entries, position: int) -> float:
+        """One clip's members for ``len(target)`` frames from transport
+        frame ``position``. Returns the peak added."""
+        frames = len(target)
+        peak = 0.0
+        for entry in entries:
+            _clip, first, end, start, loop, held, period, rate = entry
+            if held is not None:
+                continue
+            sounding = self._sounding(entry)
+            cycle = period or sounding
+            filled = 0
+            while filled < frames:
+                local = position + filled - start
+                if loop:
+                    local %= cycle
+                elif local < 0:
+                    filled += min(frames - filled, -local)
+                    continue
+                if local >= sounding:
+                    if not loop:
+                        break
+                    filled += min(frames - filled, cycle - local)  # its turn comes round again
+                    continue
+                span = min(frames - filled, sounding - local)
+                piece = target[filled : filled + span]
+                if rate == 1.0:
+                    peak = max(peak, mix_clip_into(piece, clip, first + local))
+                else:
+                    peak = max(peak, mix_clip_rate_into(piece, clip, first + local * rate, rate, end))
+                filled += span
+        return peak
+
     def set_loop(self, start_seconds, end_seconds) -> bool:
         """Loop in arrangement samples. The end is exclusive."""
         start = int(round(float(start_seconds) * OUTPUT_RATE))
@@ -597,12 +895,40 @@ class AudioEngine:
         clips = list(self._clips)
         soloed = any(clip.get("solo") for clip in clips)
         capture = self._capture_enabled and frames <= len(self._scratch)
-        segments, next_position = self._playback_segments(position, frames)
+        selection = None
+        if self._member_origin is not None:
+            # The shared clock runs on: the arrangement loop does not apply.
+            segments, next_position = [(position, frames)], position + frames
+            selection = {}
+            done = set()
+            for key, entry in self._members.items():
+                selection.setdefault(entry[0], []).append(entry)
+                if not entry[4] and entry[5] is None and position - entry[3] >= self._sounding(entry):
+                    done.add(key)
+            if done != self._members_done:
+                self._members_done = frozenset(done)
+        else:
+            segments, next_position = self._playback_segments(position, frames)
         self._heard = (self._heard + ((sounds_at, tuple(segments)),))[-HEARD_BLOCKS:]
         allowed = self._transport_filter
         for index, clip in enumerate(clips):
             heard = not clip["muted"] and not (soloed and not clip.get("solo"))
             if not heard:
+                continue
+            if selection is not None:
+                spans = selection.get(index)
+                if not spans:
+                    continue  # not selected
+                scratch = None
+                if capture and index < len(self._track_rings):
+                    scratch = self._scratch[:frames]
+                    scratch.fill(0)
+                peak = self._mix_members(scratch if scratch is not None else outdata[:frames], clip, spans, position)
+                if scratch is not None:
+                    outdata[:frames] += scratch
+                    self._track_rings[index].push(scratch)
+                if index < len(self._track_peaks) and peak > self._track_peaks[index]:
+                    self._track_peaks[index] = peak
                 continue
             ranges = None
             if allowed is not None:
@@ -900,7 +1226,9 @@ class AudioEngine:
         if not 0.0 < latency < 1.0:
             stream_latency = getattr(self._stream, "latency", 0.0)
             latency = float(stream_latency) if isinstance(stream_latency, (int, float)) else 0.0
-        return time.monotonic() + max(0.0, min(1.0, latency))
+        latency = max(0.0, min(1.0, latency))
+        self._output_delay = latency
+        return time.monotonic() + latency
 
     def play(self):
         with self._lock:
